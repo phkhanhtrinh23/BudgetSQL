@@ -1,0 +1,93 @@
+"""What one stage returned on one question, and where such records come from."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Protocol
+
+import numpy as np
+
+from ..config import DIMS, zeros
+from ..features import Observables, QuestionMeta
+from ..grammar import Stage, State
+
+
+@dataclass
+class StageOutcome:
+    """One recorded stage on one branch.
+
+    ``answer_correct`` is the correctness of the answer this stage produced
+    (``None`` for stages that only observe) and ``held_before`` the correctness
+    of the answer held before it, so a fix and a regression are labelled before
+    any selection.
+    """
+
+    obs: str
+    cost: np.ndarray = field(default_factory=zeros)
+    worst_case: np.ndarray = field(default_factory=zeros)
+    answer_correct: bool | None = None
+    held_before: bool | None = None
+    n_distinct: float = 1.0
+    completion_tokens: float = 0.0
+    equal_to_held: bool = False
+    latency: float = 0.0
+
+    # ---- labels the heads train on ----
+    @property
+    def is_fix(self) -> bool:
+        return (self.answer_correct is True) and (self.held_before is False)
+
+    @property
+    def is_regression(self) -> bool:
+        return (self.answer_correct is False) and (self.held_before is True)
+
+    def observables(self) -> Observables:
+        return Observables(n_distinct=self.n_distinct,
+                           completion_tokens=self.completion_tokens,
+                           earlier_equal=1.0 if self.equal_to_held else 0.0,
+                           n_earlier=1.0)
+
+    def to_json(self) -> dict:
+        return {
+            "obs": self.obs,
+            "cost": {k: float(v) for k, v in zip(DIMS, self.cost)},
+            "worst_case": {k: float(v) for k, v in zip(DIMS, self.worst_case)},
+            "answer_correct": self.answer_correct,
+            "held_before": self.held_before,
+            "n_distinct": self.n_distinct,
+            "completion_tokens": self.completion_tokens,
+            "equal_to_held": self.equal_to_held,
+            "latency": self.latency,
+        }
+
+    @staticmethod
+    def from_json(d: dict) -> "StageOutcome":
+        def v(key, default=0.0):
+            x = d.get(key) or {}
+            return np.array([float(x.get(k, default)) for k in DIMS])
+
+        return StageOutcome(
+            obs=d["obs"],
+            cost=v("cost"),
+            worst_case=v("worst_case"),
+            answer_correct=d.get("answer_correct"),
+            held_before=d.get("held_before"),
+            n_distinct=float(d.get("n_distinct", 1.0)),
+            completion_tokens=float(d.get("completion_tokens", 0.0)),
+            equal_to_held=bool(d.get("equal_to_held", False)),
+            latency=float(d.get("latency", 0.0)),
+        )
+
+
+class TraceSource(Protocol):
+    """A branch-faithful source of stage outcomes.
+
+    Every stage of the grammar is available on every question with its own
+    prompt, sample and charged cost; a branch is never spliced into another.
+    """
+
+    def questions(self) -> list[QuestionMeta]:
+        ...
+
+    def outcome(self, meta: QuestionMeta, state: State, stage: Stage) -> StageOutcome | None:
+        """What ``stage`` returns on this question after exactly this history."""
+        ...

@@ -1,0 +1,150 @@
+"""Methods that decide before observing anything.
+
+``BestFixedMixture`` picks, per budget group, the random mixture of workflows
+with the highest accuracy on other databases whose predicted mean cost fits the
+group's budget in every dimension.  ``OmniRouterStyle`` couples the batch in one
+linear program, but solves it once on predictions made before any answer exists.
+``Oracle`` is the hindsight optimum of the same relaxation with true outcomes.
+"""
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass, field
+
+import numpy as np
+from scipy.optimize import linprog
+
+from ..config import zeros
+from ..grammar import State, Workflow
+from ..planner.allocation import Candidate, solve
+from ..planner.meter import Meter
+from ..planner.planner import RunResult
+from ..trace.corpus import TraceCorpus
+from .base import Method
+from .profiles import Profile, profile_library
+
+
+def mixture_lp(names: list[str], profiles: dict[str, Profile],
+               per_question_budget: np.ndarray) -> dict[str, float]:
+    """The best feasible random mixture of workflows, as shares that sum to one."""
+    acc = np.array([profiles[n].acc for n in names])
+    cost = np.stack([profiles[n].cost for n in names], axis=1)      # d x m
+    res = linprog(-acc, A_ub=cost, b_ub=np.asarray(per_question_budget, dtype=float),
+                  A_eq=np.ones((1, len(names))), b_eq=[1.0], bounds=(0.0, None),
+                  method="highs-ds")
+    if not res.success or res.x is None:
+        cheapest = min(names, key=lambda n: float(np.sum(profiles[n].cost)))
+        return {cheapest: 1.0}
+    return {n: float(v) for n, v in zip(names, res.x) if v > 1e-9}
+
+
+@dataclass
+class BestFixedMixture(Method):
+    name: str = "best_fixed_mixture"
+    profiles: dict[str, Profile] = field(default_factory=dict)
+    seed: int = 0
+
+    def prepare(self, corpus: TraceCorpus, train_dbs: list[str]) -> "BestFixedMixture":
+        super().prepare(corpus, train_dbs)
+        self.profiles = profile_library(corpus, train_dbs, self.library)
+        return self
+
+    def run(self, metas, budget, meter=None) -> RunResult:
+        meter = meter or Meter(budget)
+        records = self._records(metas)
+        names = [n for n in self.library if self.profiles.get(n, Profile()).n]
+        per_q = np.asarray(budget, dtype=float) / max(1, len(metas))
+        shares = mixture_lp(names, self.profiles, per_q)
+
+        rng = random.Random(self.seed)
+        order = list(records)
+        rng.shuffle(order)
+        plan: dict[str, Workflow] = {}
+        picks = list(shares.items())
+        cum = np.cumsum([s for _, s in picks])
+        for qid in order:
+            u = rng.random() * (cum[-1] if len(cum) else 1.0)
+            idx = int(np.searchsorted(cum, u))
+            plan[qid] = self.library[picks[min(idx, len(picks) - 1)][0]]
+
+        ctx = self._ctx(meter)
+        from ..planner.execute import run_workflow
+        left = len(order)
+        for qid in order:
+            rec = records[qid]
+            left -= 1
+            wf = plan[qid]
+            mean = self.profiles[wf.name or ""].cost if (wf.name in self.profiles) else zeros()
+            if left and np.any(mean > self._pace(meter, left + 1)):
+                cheap = self._cheapest(rec.state)
+                wf = cheap if cheap is not None else wf
+            run_workflow(ctx, rec, wf)
+        predicted = float(sum(self.profiles[n].acc * s for n, s in shares.items()))
+        return self._result(records, meter, predicted)
+
+
+@dataclass
+class OmniRouterStyle(Method):
+    """One linear program over the batch, solved once, before anything runs."""
+
+    name: str = "omnirouter_style"
+
+    def prepare(self, corpus, train_dbs) -> "OmniRouterStyle":
+        super().prepare(corpus, train_dbs)
+        from ..worldmodel.model import StageWorldModel
+        self.model = StageWorldModel(self.cfg).fit(corpus, train_dbs)
+        return self
+
+    def run(self, metas, budget, meter=None) -> RunResult:
+        meter = meter or Meter(budget)
+        records = self._records(metas)
+        wfs = list(self.library.values())
+        items = [(m, State(), wf) for wf in wfs for m in metas]
+        rolls = self.model.rollout_many(items, [0.0] * len(items))
+        cands: list[Candidate] = []
+        k = 0
+        for wf in wfs:
+            for m in metas:
+                r = rolls[k]
+                cands.append(Candidate(m.qid, wf.name or "", r.p, r.cost, r.var,
+                                       r.worst_case, payload=wf))
+                k += 1
+        for m in metas:
+            cands.append(Candidate(m.qid, "stop", 0.0, zeros(), zeros(), zeros(),
+                                   is_stop=True, payload=None))
+        alloc = solve(cands, np.asarray(budget, dtype=float))
+        from ..planner.execute import run_workflow
+        ctx = self._ctx(meter)
+        for qid, cand in alloc.chosen().items():
+            if cand.payload is not None:
+                run_workflow(ctx, records[qid], cand.payload)
+        n = max(1, len(metas))
+        return self._result(records, meter, alloc.value / n, [alloc.duals])
+
+
+@dataclass
+class Oracle(Method):
+    """The hindsight optimum: the same relaxation with the outcomes the trace
+    actually produced."""
+
+    name: str = "oracle"
+
+    def run(self, metas, budget, meter=None) -> RunResult:
+        meter = meter or Meter(budget)
+        records = self._records(metas)
+        cands: list[Candidate] = []
+        for m in metas:
+            for name, wf in self.library.items():
+                _, ok, cost, _ = self.corpus.run(m, State(), wf)
+                cands.append(Candidate(m.qid, name, float(ok), cost, zeros(), cost,
+                                       payload=wf))
+            cands.append(Candidate(m.qid, "stop", 0.0, zeros(), zeros(), zeros(),
+                                   is_stop=True, payload=None))
+        alloc = solve(cands, np.asarray(budget, dtype=float))
+        from ..planner.execute import run_workflow
+        ctx = self._ctx(meter)
+        for qid, cand in alloc.chosen().items():
+            if cand.payload is not None:
+                run_workflow(ctx, records[qid], cand.payload)
+        n = max(1, len(metas))
+        return self._result(records, meter, alloc.value / n, [alloc.duals])
