@@ -55,8 +55,12 @@ DEFAULT_COMPLETION = 600
 @dataclass(frozen=True)
 class ExecutorLimits:
     max_completion_tokens: int = DEFAULT_COMPLETION
+    #: Timeout of one LLM call (one sample).
     timeout_s: float = 10.0
+    #: Timeout of one SQL statement.
     sql_timeout_s: float = 10.0
+    #: Time limit of a local Context stage (schema retrieval, no LLM call).
+    context_timeout_s: float = 1.0
     #: Completion cap of the large tier, where it reasons before answering.
     #: ``None`` gives it the same cap as the others.
     large_completion_tokens: int | None = None
@@ -84,15 +88,23 @@ class PlannerConfig:
 
     # allocation / adaptation
     replan_block: int = 25         # K continuations between re-solves
-    drift_threshold: float = 0.15  # relative cost drift that flags a digest cell
-    #: Miss probability of the Bernstein reserve.  Left unset, the reserve
-    #: follows the newsvendor condition at the plan's own gain per priced
-    #: unit, which is what a hard meter leaves it to do.
+    #: Relative cost drift, and shift of observation shares, that flags a
+    #: digest cell.
+    drift_threshold: float = 0.15
+    #: Hold the cost reserve rho of Eq. 8 back from the program's right-hand
+    #: side.  Off in the replay of Sec. VII-A, where rho = 0 and the meter
+    #: alone enforces the budget; the ablation "with a cost reserve" turns it on.
+    cost_reserve: bool = False
+    #: Miss probability of the Bernstein reserve (the log(d/delta) variant of
+    #: Prop. 3).  Left unset, the reserve follows the newsvendor condition at
+    #: the block's own gain per priced unit.
     reserve_delta: float | None = None
-    #: Ablation: a reserve of ``reserve_z`` predicted standard deviations
-    #: instead of the newsvendor bound.
+    #: A reserve of ``reserve_z`` predicted standard deviations instead of the
+    #: Bernstein bound (the ablation uses one standard deviation).
     reserve_z: float | None = None
     use_allocation_lp: bool = True # ablation: greedy ranking instead of the LP
+    #: Re-solve every K continuations.  Off, the continuation program is solved
+    #: once after the opening session and its whole plan is run.
     periodic_resolves: bool = True
     priced_dims: tuple[str, ...] = DIMS  # ablation: ("usd",) prices money alone
 
@@ -100,12 +112,37 @@ class PlannerConfig:
     max_digest_cells: int = 40     # G_max
     digest_tokens: int = 1400
     latent_tokens: int = 64
+    #: Completion cap and timeout of one agent turn: with the digest they give
+    #: the turn's worst case rho_turn, known before the turn.
+    agent_completion_tokens: int = 400
+    agent_timeout_s: float = 6.0
+    #: The results of the agent's previous tool calls it reads with the next
+    #: digest, capped so the turn's prompt stays bounded.
+    agent_result_tokens: int = 200
     turns_per_session: int = 6
     max_sessions: int = 11
     planning_cap: float = 0.10     # share of the money budget planning may take
     max_candidates: int = 8        # W_max per question
     probe_questions: int = 8
     use_agent: bool = True
+    #: How the agent's turns enter a run.  ``"modelled"`` is the replay of
+    #: Sec. VII-A: the certificate decides when a turn would be taken, the turn
+    #: is charged to the budget, and its accuracy effect enters the evaluation
+    #: as a modelled, additive per-vector effect (``eval.effects``).
+    #: ``"live"`` runs the agent's tool calls and charges what the turn cost.
+    agent_mode: str = "modelled"
+    #: Cost charged for a modelled turn, or for a live turn whose agent does
+    #: not report what it cost; ``None`` charges the turn's worst case.
+    modelled_turn_cost: tuple[float, float, float] | None = None
+    #: Take turns without reserving or charging them, so a run measures what
+    #: the turns add apart from their cost (the derived agent rows).
+    free_turns: bool = False
+    #: Downgrade a question to the cheapest feasible call when the remaining
+    #: budget could not cover the later questions (the baselines' pacing rule).
+    pacing: bool = False
+    #: Depth of the certificate's search over the grammar; ``None`` searches
+    #: every composition the grammar admits from a state, as Eq. 7 states.
+    certificate_depth: int | None = None
     #: Score continuations from the question alone, ignoring what the first
     #: stage actually returned.
     score_from_empty: bool = False
@@ -118,7 +155,14 @@ class PlannerConfig:
     use_differential_features: bool = True
     use_rollouts: bool = True
     use_stacking: bool = True
-    online_cost_updates: bool = True
+    #: Select (Sec. IV-B): keep a replacing stage's new answer iff f-hat > r-hat.
+    #: Off, a new answer is always kept (the planners without a world model).
+    use_select: bool = True
+    #: Online cost updates of Eq. 5.  Off in the replay until Sec. VII-D.
+    online_cost_updates: bool = False
+    #: Within-batch recalibration of the success heads from observed execution
+    #: rates (Sec. VI), part of the online updates of Sec. VII-D.
+    recalibrate_success: bool = False
 
     limits: ExecutorLimits = field(default_factory=ExecutorLimits)
     seed: int = 0
@@ -132,7 +176,10 @@ class PlannerConfig:
         return (self.min_support, self.n_estimators, self.num_leaves,
                 self.learning_rate, self.log_scale_costs,
                 self.use_question_features, self.use_execution_features,
-                self.use_differential_features)
+                self.use_differential_features,
+                # the stacks are fitted on what the planner reads (rollouts or
+                # the direct head) and on outcomes realised under Select
+                self.use_rollouts, self.use_select)
 
 
 #: Per-question budget vectors: money in USD, prompt+completion tokens, and
@@ -165,6 +212,21 @@ class Workload:
     #: reasoning model as the large tier to answer anything.
     models: dict[str, str] = field(default_factory=lambda: {
         "S": "qwen2.5-7b-instruct", "M": "gpt-4.1-mini", "L": "gpt-4.1"})
+    #: List prices of the tiers this workload's models change (USD / 1M
+    #: tokens); the meter's worst cases and simulated costs read them.
+    prices: dict[str, Price] = field(default_factory=dict)
+
+
+#: The executor prices of the default workload, before any is applied.
+BASE_PRICES: dict[str, Price] = dict(PRICES)
+
+
+def use_workload_prices(workload: "Workload") -> None:
+    """Set the tier prices of a workload (BIRD's list prices, or those of the
+    models a workload names instead, as GPT-5 for Spider 2.0-Lite's large
+    tier)."""
+    for tier in TIERS:
+        PRICES[tier] = workload.prices.get(tier, BASE_PRICES[tier])
 
 
 #: Spider 2.0-Lite prompts are several times as long as BIRD's and its large
@@ -181,7 +243,8 @@ WORKLOADS: dict[str, Workload] = {
                              runs=5, budgets=("SP",),
                              n_questions=135, n_dbs=30, limits=SPIDER_LIMITS,
                              models={"S": "qwen2.5-7b-instruct",
-                                     "M": "gpt-4.1-mini", "L": "gpt-5"}),
+                                     "M": "gpt-4.1-mini", "L": "gpt-5"},
+                             prices={"L": Price(1.25, 10.00)}),
 }
 
 BOOTSTRAP_RESAMPLES = 4000
@@ -196,6 +259,9 @@ GRID_AXES: dict[str, tuple[float, ...]] = {
 
 #: The slack a dimension the grid does not vary receives.
 GRID_SLACK: dict[str, float] = {"usd": 4.0e-3, "tok": 20000.0, "sec": 40.0}
+
+#: Money per question of the money sweep (Fig. 3(a)), tokens and time slack.
+SWEEP_MONEY: tuple[float, ...] = (0.3e-3, 0.5e-3, 0.8e-3, 1.2e-3, 2.0e-3)
 
 
 def budget_for_group(name: str, n_questions: int) -> np.ndarray:

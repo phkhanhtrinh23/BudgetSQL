@@ -2,11 +2,12 @@
 
 The meter never trusts a prediction.  Calls may run in parallel, so budget is
 reserved at launch: a call starts only if its worst case fits what is left after
-the spend and the reservations in flight.  The worst case is the call's prompt,
-whose tokens and price are known before sending, plus its completion limit and
-its timeout for every sample it draws.  On return the unused part of the
-reservation is released.  A call that reaches a limit is cancelled, charged what
-it consumed, and returns nothing.
+the spend and the reservations in flight (Prop. 1).  The worst case is the
+call's prompt, whose tokens and price are known before sending, plus its
+completion limit and its timeout for every sample it draws, plus the timeout of
+every SQL statement it runs.  Those limits are set to what the remainder can pay
+for.  On return the unused part of the reservation is released.  A call that
+reaches a limit is cancelled, charged what it consumed, and returns nothing.
 """
 from __future__ import annotations
 
@@ -14,8 +15,24 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..config import DIMS, PRICES, zeros
+from ..config import DIMS, PRICES, ExecutorLimits, zeros
+from ..costs import sql_statements, stage_worst_case
 from ..grammar import Stage
+
+#: An LLM call is launched only if the remainder pays for at least this many
+#: completion tokens and this many seconds per sample.
+MIN_USEFUL_COMPLETION = 16
+MIN_USEFUL_TIMEOUT_S = 0.5
+
+
+@dataclass(frozen=True)
+class CallLimits:
+    """The limits a call is launched with and the reservation they imply."""
+
+    completion: int
+    timeout_s: float
+    sql_timeout_s: float
+    worst_case: np.ndarray
 
 
 class BudgetExceeded(RuntimeError):
@@ -37,11 +54,20 @@ class MeterStats:
     cancelled: int = 0
     spend: np.ndarray = field(default_factory=zeros)
     planning_spend: np.ndarray = field(default_factory=zeros)
+    #: what the calls of each executor tier were charged
+    tier_spend: dict[str, np.ndarray] = field(default_factory=dict)
+
+    def tier_money_share(self) -> dict[str, float]:
+        """Each tier's share of the money spent on answering."""
+        total = sum(float(v[0]) for v in self.tier_spend.values())
+        return {t: (float(v[0]) / total if total > 0 else 0.0)
+                for t, v in self.tier_spend.items()}
 
     def as_dict(self) -> dict:
         return {
             "launched": self.launched, "refused": self.refused,
             "cancelled": self.cancelled,
+            "tier_money_share": self.tier_money_share(),
             **{f"spend_{k}": float(v) for k, v in zip(DIMS, self.spend)},
             **{f"planning_{k}": float(v) for k, v in zip(DIMS, self.planning_spend)},
         }
@@ -101,7 +127,7 @@ class Meter:
         return r
 
     def settle(self, r: Reservation, cost: np.ndarray, cancelled: bool = False,
-               planning: bool = False) -> np.ndarray:
+               planning: bool = False, tier: str | None = None) -> np.ndarray:
         """Charge what the call consumed and release the rest of its reservation."""
         if r.released:
             raise BudgetExceeded("reservation settled twice")
@@ -111,16 +137,31 @@ class Meter:
         self.stats.spend = self.stats.spend + charged
         if planning:
             self.stats.planning_spend = self.stats.planning_spend + charged
+        if tier:
+            self.stats.tier_spend[tier] = self.stats.tier_spend.get(tier, zeros()) + charged
         if cancelled:
             self.stats.cancelled += 1
         if np.any(self.stats.spend > self.budget + 1e-9):
             raise BudgetExceeded(f"spend {self.stats.spend} exceeds budget {self.budget}")
         return charged
 
+    def release(self, r: Reservation) -> None:
+        """Release a reservation whose call never started, charging nothing."""
+        if r.released:
+            raise BudgetExceeded("reservation released twice")
+        self._reservations.pop(r.rid, None)
+        r.released = True
+        self.stats.launched -= 1
+
     def charge(self, cost: np.ndarray, worst_case: np.ndarray | None = None,
-               label: str = "", planning: bool = False) -> np.ndarray | None:
+               label: str = "", planning: bool = False,
+               cancelled: bool | None = None, tier: str | None = None
+               ) -> np.ndarray | None:
         """Reserve, run and settle in one step, for calls run one at a time.
-        Returns the charged cost, or ``None`` when the meter refuses the call."""
+        Returns the charged cost, or ``None`` when the meter refuses the call.
+        A call whose cost exceeds its reservation in any dimension reached a
+        limit and is cancelled; ``cancelled`` says so explicitly when the
+        caller has already cut the cost at the limit."""
         wc = np.asarray(cost if worst_case is None else worst_case, dtype=float)
         if planning and not self._planning_allowed(wc):
             self.stats.refused += 1
@@ -128,8 +169,21 @@ class Meter:
         r = self.reserve(wc, label)
         if r is None:
             return None
-        cancelled = bool(np.any(np.asarray(cost, dtype=float) > r.worst_case + 1e-12))
-        return self.settle(r, cost, cancelled=cancelled, planning=planning)
+        if cancelled is None:
+            cancelled = bool(np.any(np.asarray(cost, dtype=float) > r.worst_case + 1e-12))
+        return self.settle(r, cost, cancelled=cancelled, planning=planning, tier=tier)
+
+    def reserve_planning(self, worst_case: np.ndarray, label: str = ""
+                         ) -> Reservation | None:
+        """Reserve a planning call, which must also fit the planning cap."""
+        wc = np.asarray(worst_case, dtype=float)
+        if not self._planning_allowed(wc):
+            self.stats.refused += 1
+            return None
+        return self.reserve(wc, label)
+
+    def planning_allowed(self, worst_case: np.ndarray) -> bool:
+        return self._planning_allowed(np.asarray(worst_case, dtype=float))
 
     def _planning_allowed(self, worst_case: np.ndarray) -> bool:
         if self.planning_cap is None:
@@ -152,18 +206,48 @@ class Meter:
         tok_left = max(0.0, free[1]) / per_sample - prompt_tokens
         return int(max(0, min(cap, by_usd, tok_left)))
 
-    def worst_case_of(self, stage: Stage, prompt_tokens: float,
-                      timeout_s: float = 10.0, cap: int | None = None) -> np.ndarray:
-        price = PRICES.get(stage.tier)
-        if price is None:
-            return np.array([0.0, 0.0, timeout_s * 0.1])
-        c = stage.cap if cap is None else cap
+    def limits_for(self, stage: Stage, prompt_tokens: float,
+                   limits: ExecutorLimits | None = None) -> CallLimits | None:
+        """The limits a stage is launched with: its completion cap and timeouts,
+        each lowered to what the remainder can pay for.  ``None`` when the
+        remainder cannot pay for a useful call, which the caller treats as a
+        refusal."""
+        limits = limits or ExecutorLimits()
+        free = self.free
+        n_sql = sql_statements(stage)
+        sql_t = float(limits.sql_timeout_s)
+        if stage.kind == "context":
+            return CallLimits(0, 0.0, 0.0, stage_worst_case(stage, 0.0, limits))
+        if not stage.llm_calls:
+            if n_sql:
+                sql_t = min(sql_t, max(0.0, float(free[2])) / n_sql)
+                if sql_t <= 0.0:
+                    return None
+            return CallLimits(0, 0.0, sql_t,
+                              stage_worst_case(stage, 0.0, limits, sql_timeout_s=sql_t))
         n = max(1, stage.samples)
-        return np.array([
-            (prompt_tokens * price.inp + c * price.out) * 1e-6 * n,
-            (prompt_tokens + c) * n,
-            timeout_s * n,
-        ])
+        ceiling = limits.cap_for(stage.tier, stage.cap)
+        cap = self.affordable_completion(stage, prompt_tokens, ceiling)
+        if cap < MIN_USEFUL_COMPLETION:
+            return None
+        llm_time = max(0.0, float(free[2]) - n_sql * sql_t) / n
+        t = min(float(limits.timeout_s), llm_time)
+        if t < MIN_USEFUL_TIMEOUT_S:
+            return None
+        return CallLimits(cap, t, sql_t,
+                          stage_worst_case(stage, prompt_tokens, limits, cap=cap,
+                                           timeout_s=t, sql_timeout_s=sql_t))
+
+    def worst_case_of(self, stage: Stage, prompt_tokens: float,
+                      timeout_s: float = 10.0, cap: int | None = None,
+                      sql_timeout_s: float | None = None) -> np.ndarray:
+        """The worst case of a stage at the given limits; an SQL statement's
+        worst case is the SQL timeout, not a share of the LLM timeout."""
+        lim = ExecutorLimits(timeout_s=timeout_s,
+                             sql_timeout_s=timeout_s if sql_timeout_s is None
+                             else sql_timeout_s)
+        return stage_worst_case(stage, prompt_tokens, lim,
+                                cap=stage.cap if cap is None else cap)
 
     def snapshot(self) -> dict:
         return {"budget": self.budget.tolist(), **self.stats.as_dict(),

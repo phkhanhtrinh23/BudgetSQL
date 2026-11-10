@@ -18,13 +18,14 @@ from ..config import D
 from .allocation import Allocation, Candidate
 
 
-def theta(alloc: Allocation, tol: float = 1e-12) -> float:
-    """The smallest gain per priced unit among the planned continuations."""
+def theta(alloc: Allocation, tol: float = 1e-12, block: int | None = None) -> float:
+    """The smallest gain per priced unit, at least one (complementary
+    slackness), among the continuations planned before the next re-solve: the
+    first ``block`` of the run order, or every planned one."""
     stop = {c.qid: c.value for c in alloc.candidates if c.is_stop}
+    planned = run_order(alloc) if block is None else run_order(alloc)[:max(0, block)]
     ratios = []
-    for c, xv in zip(alloc.candidates, alloc.x):
-        if xv <= tol or c.is_stop:
-            continue
+    for c in planned:
         priced = float(alloc.duals @ c.cost)
         gain = c.value - stop.get(c.qid, 0.0)
         if priced > tol and gain > 0:
@@ -34,13 +35,18 @@ def theta(alloc: Allocation, tol: float = 1e-12) -> float:
     return max(1.0, min(ratios))
 
 
-def run_order(alloc: Allocation) -> list[Candidate]:
-    """Continuations run in decreasing order of gain per priced unit; those with
-    no priced cost run first, in decreasing order of gain."""
+def run_order(alloc: Allocation, tol: float = 1e-7) -> list[Candidate]:
+    """The planned continuations in the order they run: decreasing gain per
+    priced unit, those with no priced cost first, in decreasing order of gain.
+
+    The extreme point splits at most d questions between candidates, and a
+    split question stops at this solve, keeping its held answer (Sec. IV-C,
+    Prop. 3): only questions whose whole mass is on one continuation run."""
     stop = {c.qid: c.value for c in alloc.candidates if c.is_stop}
+    split = set(alloc.split_questions(tol))
     free, priced = [], []
     for c, xv in zip(alloc.candidates, alloc.x):
-        if xv <= 1e-12 or c.is_stop:
+        if xv <= tol or c.is_stop or c.qid in split:
             continue
         gain = c.value - stop.get(c.qid, 0.0)
         p = float(alloc.duals @ c.cost)
@@ -60,12 +66,14 @@ def bernstein_reserve(variances: np.ndarray, ranges: np.ndarray,
 
 def reserve_for(alloc: Allocation, block: int, duals: np.ndarray,
                 delta: float | None = None, z: float | None = None) -> np.ndarray:
-    """The reserve the next block of continuations deserves.
+    """The reserve rho of Eq. 8 for the next block of continuations.
 
-    With ``delta`` given, the log term is ``log(d/delta)`` and the reserve is the
-    one that bounds the miss probability; with ``z`` it is that many predicted
-    standard deviations; otherwise it follows the newsvendor condition at the
-    plan's own gain per priced unit.
+    Per dimension, the variances of the block's continuations are summed and
+    c-bar is the meter's worst case for one continuation.  With ``delta``
+    given, the log term is ``log(d/delta)`` (Prop. 3's variant); with ``z`` the
+    reserve is that many predicted standard deviations; otherwise the log term
+    is ``log theta`` at the block's smallest gain per priced unit (the
+    newsvendor condition).  rho_k = 0 where lambda_k = 0.
     """
     order = run_order(alloc)[:max(0, block)]
     if not order:
@@ -78,7 +86,8 @@ def reserve_for(alloc: Allocation, block: int, duals: np.ndarray,
     if z is not None:
         rho = float(z) * np.sqrt(var)
     else:
-        log_term = math.log(D / delta) if delta else math.log(max(1.0, theta(alloc)))
+        log_term = (math.log(D / delta) if delta
+                    else math.log(max(1.0, theta(alloc, block=block))))
         rho = bernstein_reserve(var, rng, log_term)
     duals = np.asarray(duals, dtype=float)
     rho = np.where(duals > 0, rho, 0.0)     # held only in priced dimensions

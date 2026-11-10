@@ -186,10 +186,11 @@ class SimulatedTrace:
 
     def _used_before(self, state: State, held: Stage) -> int:
         """Samples of the held answer's tier drawn before the stage produced it."""
-        last = -1
-        for i, (s, _) in enumerate(state.history):
-            if s == held:
-                last = i
+        last = state.answer_index
+        if last < 0:
+            for i, (s, _) in enumerate(state.history):
+                if s == held:
+                    last = i
         if last < 0:
             return 0
         return sum(s.samples for s, _ in state.history[:last] if s.tier == held.tier)

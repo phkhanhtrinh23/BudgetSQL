@@ -4,6 +4,12 @@ Every learned component that scores a question is fitted on the other budget
 groups, so no question is planned with a model that has seen its schema, and
 every setting a method tunes is chosen on the other groups too.  Fitted
 components are cached on disk, because a sweep re-uses them many times.
+
+A run covers the whole batch: each budget group has its own share of the
+budget and its own meter, BudgetSQL plans the groups with one agent and one
+digest (``BatchPlanner``), and so do the agent baselines.  When BudgetSQL's
+turns are modelled, its result carries the modelled effect of the vector
+(``budgetsql.eval.effects``).
 """
 from __future__ import annotations
 
@@ -16,16 +22,18 @@ from pathlib import Path
 import numpy as np
 
 from ..baselines import BASELINES, Oracle
+from ..baselines.agents import AgentDryRuns, AgentNoWorldModel, run_agent_batch
 from ..config import (PlannerConfig, Workload, budget_for_group,
-                      WORKLOADS)
+                      use_workload_prices, WORKLOADS)
 from ..features import QuestionMeta
 from ..grammar import reference_library
-from ..planner import BudgetSQL, Meter, PlanningAgent
+from ..planner import BatchPlanner, BudgetSQL, Meter, PlanningAgent
+from .effects import Effect, ModelledEffects, applies
 from ..trace.corpus import TraceCorpus, split_dbs
 from ..worldmodel.stacking import CrossFitStacker, StackedValues
 from .pooled import PooledValues
 
-CACHE_VERSION = 2
+CACHE_VERSION = 4
 
 
 def _hash(*parts) -> str:
@@ -58,8 +66,18 @@ class Workbench:
     cache_dir: Path | None = None
     library: dict = field(default_factory=reference_library)
     inner_folds: int = 4
+    #: The agent's modelled effects per budget vector (Sec. VII-A); none
+    #: leaves BudgetSQL at its replayed accuracy.
+    effects: ModelledEffects = field(default_factory=ModelledEffects)
+    #: Builds the agent whose turns are taken in live mode, for BudgetSQL and
+    #: for the agent baselines alike; called with ``probe`` (may it probe).
+    #: ``None`` uses the rule-based stand-ins (``PlanningAgent`` for BudgetSQL,
+    #: ``BudgetTrackerAgent`` for the baselines); ``chat_agent_from_env`` is the
+    #: language-model agent of the paper.
+    agent_factory: object = None
 
     def __post_init__(self) -> None:
+        use_workload_prices(self.workload)      # e.g. GPT-5 as Spider's large tier
         self._values: dict[str, StackedValues] = {}
         self._methods: dict[tuple[str, str], object] = {}
         if self.cache_dir is not None:
@@ -187,6 +205,16 @@ class Workbench:
         return BudgetSQL(values, self.corpus, self.corpus.grammar, cfg, agent,
                          self.library)
 
+    def effect(self, cfg: PlannerConfig, budget: str | None, vector=None,
+               budget_scale: float = 1.0) -> Effect:
+        """The modelled effect a BudgetSQL run under ``cfg`` carries."""
+        if not applies(cfg):
+            return Effect()
+        if vector is None and budget_scale != 1.0:
+            from ..config import BUDGETS
+            vector = BUDGETS[budget] * budget_scale
+        return self.effects.at(budget, vector)
+
     # ---- runs ----
     def order_metas(self, metas: list[QuestionMeta], run: int,
                     order: str = "random") -> list[QuestionMeta]:
@@ -203,36 +231,61 @@ class Workbench:
     def run_method(self, name: str, budget: str, runs: int | None = None,
                    cfg: PlannerConfig | None = None, agent=None,
                    budget_scale: float = 1.0, order: str = "random",
-                   vector=None, thinned: bool = False) -> dict:
-        """Run one method on every budget group, over several question orders."""
+                   vector=None, thinned: bool = False, agent_factory=None,
+                   with_effects: bool = True) -> dict:
+        """Run one method on the whole batch, over several question orders.
+
+        Every budget group gets its share of the budget and its own meter.
+        BudgetSQL and the agent baselines plan the groups together, with one
+        agent whose turns each group pays in proportion to its questions."""
         cfg = cfg or self.cfg
         runs = runs or self.workload.runs
         per_run: list[dict[str, bool]] = []
         details: list[dict] = []
+        groups = self.groups()
         for r in range(runs):
-            correct: dict[str, bool] = {}
-            for group in self.groups():
+            items = []
+            for group in groups:
                 metas = self.order_metas(group.metas, r, order)
                 if vector is None:
                     b = budget_for_group(budget, group.size) * budget_scale
                 else:
                     b = np.asarray(vector, dtype=float) * float(group.size)
-                meter = Meter(b, planning_cap=cfg.planning_cap if name == "budgetsql" else None)
-                if name == "budgetsql":
-                    res = self.planner(group, cfg, agent, thinned).run(metas, b,
-                                                                       meter)
-                else:
-                    method = self.method(name, group, cfg)
+                items.append((metas, b, Meter(b, planning_cap=cfg.planning_cap)))
+            if name == "budgetsql":
+                planners = [self.planner(g, cfg, None, thinned) for g in groups]
+                if agent_factory is not None:
+                    agent = agent_factory()
+                elif agent is None and cfg.use_agent:
+                    agent = (self.agent_factory(True) if self.agent_factory is not None
+                             else PlanningAgent())
+                results = BatchPlanner(planners, cfg, agent).run(items)
+            elif BASELINES.get(name) in (AgentNoWorldModel, AgentDryRuns):
+                methods = [self.method(name, g, cfg).with_cfg(cfg) for g in groups]
+                if self.agent_factory is not None:
+                    # the same agent model and tools, without the world model
+                    for m in methods:
+                        m.agent_factory = lambda: self.agent_factory(True)
+                results = run_agent_batch(methods, items)
+            else:
+                results = []
+                for group, (metas, b, _) in zip(groups, items):
+                    method = self.method(name, group, cfg).with_cfg(cfg)
                     model = getattr(method, "model", None)
                     if model is not None:
                         model.reset_online()   # a cached fit starts each run fresh
-                    res = method.run(metas, b, meter)
+                    results.append(method.run(metas, b, Meter(b)))
+            correct: dict[str, bool] = {}
+            for group, res in zip(groups, results):
                 correct.update(res.correct)
                 details.append({"run": r, "group": group.name, "method": name,
                                 "budget": budget, **res.as_dict()})
             per_run.append(correct)
-        return {"method": name, "budget": budget, "runs": per_run,
-                "details": details}
+        out = {"method": name, "budget": budget, "runs": per_run,
+               "details": details, "effect": Effect().as_dict()}
+        if name == "budgetsql" and with_effects:
+            out["effect"] = self.effect(cfg, budget, vector, budget_scale).as_dict()
+        return out
 
     def unit_of(self) -> dict[str, str]:
         out: dict[str, str] = {}

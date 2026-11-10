@@ -34,6 +34,12 @@ class PooledModel:
     def predict(self, meta, state, stage):
         return self._of(meta).predict(meta, state, stage)
 
+    def child(self, state, stage, obs, keep=True, meta=None):
+        return self._of(meta).child(state, stage, obs, keep, meta)
+
+    def predict_raw(self, meta, state, stage):
+        return self._of(meta).predict_raw(meta, state, stage)
+
     def predict_batch(self, items):
         by_db: dict[str, list] = {}
         for item in items:
@@ -79,8 +85,8 @@ class PooledModel:
     def observe_cost(self, db, stage, predicted, realized, completed=True):
         self.by_db[db].observe_cost(db, stage, predicted, realized, completed)
 
-    def kappa(self, db: str, stage_kind: str) -> np.ndarray:
-        return self.by_db[db].kappa(db, stage_kind)
+    def kappa(self, db: str, stage) -> np.ndarray:
+        return self.by_db[db].kappa(db, stage)
 
     def reset_online(self) -> None:
         for m in self.by_db.values():
@@ -118,6 +124,20 @@ class PooledValues:
 
     def with_cfg(self, cfg: PlannerConfig) -> "PooledValues":
         return PooledValues({d: v.with_cfg(cfg) for d, v in self.by_db.items()}, cfg)
+
+    def bound_forms(self, metas, states, s_held, grammar=None) -> list:
+        """Each question's certificate bound from its own database's stacks."""
+        out: list = [None] * len(metas)
+        index: dict[str, list[int]] = {}
+        for i, m in enumerate(metas):
+            index.setdefault(m.db, []).append(i)
+        for db, idx in index.items():
+            got = self.by_db[db].bound_forms([metas[i] for i in idx],
+                                             [states[i] for i in idx],
+                                             [s_held[i] for i in idx], grammar)
+            for i, g in zip(idx, got):
+                out[i] = g
+        return out
 
     def values(self, metas: list[QuestionMeta], states: list[State],
                wfs: list[Workflow], rolls: list, s_held: list[float]) -> np.ndarray:

@@ -5,7 +5,8 @@ exceeds a price that tracks the remaining budget.  ``UABStyle`` answers every
 question with the small tier and spends what is left on the answers a learned
 scorer is least confident about.  ``VineLMStyle`` plans each request on its own
 share of the budget from profiled success rates per workflow and observation, so
-slack cannot move from one question to another.
+slack cannot move from one question to another.  All three run under the meter
+with the pacing rule of ``Method``.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..grammar import Workflow, parse_chain
+from ..grammar import State, Workflow, parse_chain
 from ..planner.execute import first_block, run_workflow
 from ..planner.meter import Meter
 from ..planner.planner import RunResult
@@ -21,9 +22,25 @@ from ..trace.corpus import TraceCorpus
 from .base import Method
 from .profiles import DEFAULT_CONTINUATIONS, Profile, lookup, profile_continuations, profile_library
 
+TIER_ORDER = ("S", "M", "L")
+
 
 def _openers(library: dict[str, Workflow]) -> dict[str, Workflow]:
-    return {t: library[t] for t in ("S", "M", "L") if t in library}
+    return {t: library[t] for t in TIER_ORDER if t in library}
+
+
+def _ladder(tier: str, obs: str) -> list[str]:
+    """The escalation steps a cascade may climb after ``tier`` observed ``obs``,
+    each given as the chain run so far: a failed or empty answer is repaired by
+    the large tier, a valid one escalates through the tiers above it."""
+    if obs.split(".")[0] in ("error", "empty"):
+        return ["rep:L"] if tier else []
+    above = [t for t in TIER_ORDER if TIER_ORDER.index(t) > TIER_ORDER.index(tier)]
+    return [",".join(f"esc:{t}" for t in above[:i + 1]) for i in range(len(above))]
+
+
+#: The chains a cascade's profiles cover: every rung of every ladder.
+CASCADE_CHAINS = ("stop", "rep:L", "esc:M", "esc:L", "esc:M,esc:L")
 
 
 @dataclass
@@ -39,7 +56,7 @@ class CascadeRouting(Method):
         self.model = StageWorldModel(self.cfg).fit(corpus, train_dbs)
         self.profiles = profile_library(corpus, train_dbs, _openers(self.library))
         self.table = profile_continuations(corpus, train_dbs, _openers(self.library),
-                                           ("stop", "esc:L", "rep:L"))
+                                           CASCADE_CHAINS)
         return self
 
     def _choose_tier(self, per_q: np.ndarray) -> str:
@@ -58,33 +75,41 @@ class CascadeRouting(Method):
         tier = self._choose_tier(per_q)
         self.first_tier = tier
         ctx = self._ctx(meter)
-        opener = self.library[tier]
+        opener = first_block(self.library[tier])
+        scale = np.maximum(per_q, 1e-12)
 
         left = len(records)
         for rec in records.values():
             left -= 1
-            run_workflow(ctx, rec, first_block(opener))
-            if rec.closed:
-                continue
+            run_workflow(ctx, rec, self._paced_opening(
+                meter, rec, opener, self.profiles[tier].cost, left))
+            if rec.closed or rec.state.answer_stage is None \
+                    or rec.state.answer_stage.tier != tier:
+                continue                     # downgraded or never answered
             obs = rec.state.answer_obs or "-"
-            spec = "rep:L" if obs.split(".")[0] in ("error", "empty") else "esc:L"
-            prof = lookup(self.table, tier, obs, spec)
-            if prof is None:
-                continue
-            s = rec.s_held
-            gain = max(0.0, prof.acc - s)
-            scale = np.maximum(per_q, 1e-12)
-            norm = float(np.max(prof.cost / scale))
-            if norm <= 0:
-                continue
-            # the price tracks what is left: the tighter the budget, the higher
-            # the gain an escalation must promise
-            frac_left = float(np.min(meter.remaining / np.maximum(meter.budget, 1e-12)))
-            price = (1.0 - frac_left) + 0.05
-            if gain / norm > price:
-                chain = parse_chain(spec)
-                if self.grammar.is_wellformed(chain, rec.state):
-                    run_workflow(ctx, rec, chain)
+            spent = np.zeros_like(per_q)
+            # escalate while the estimated gain per normalised cost exceeds a
+            # price that tracks what is left of the budget
+            for chain in _ladder(tier, obs):
+                prof = lookup(self.table, tier, obs, chain)
+                if prof is None:
+                    break
+                step_cost = np.maximum(prof.cost - spent, 0.0)
+                gain = max(0.0, prof.acc - rec.s_held)
+                norm = float(np.max(step_cost / scale))
+                if norm <= 0:
+                    break
+                frac_left = float(np.min(meter.remaining / np.maximum(meter.budget, 1e-12)))
+                price = (1.0 - frac_left) + 0.05
+                if gain / norm <= price or not self._paced(meter, step_cost, left):
+                    break
+                step = parse_chain(chain.split(",")[-1])
+                if not self.grammar.is_wellformed(step, rec.state):
+                    break
+                report = run_workflow(ctx, rec, step)
+                if not report.made_progress:
+                    break
+                spent = prof.cost
         return self._result(records, meter)
 
 
@@ -107,15 +132,23 @@ class UABStyle(Method):
         meter = meter or Meter(budget)
         records = self._records(metas)
         ctx = self._ctx(meter)
-        opener = self.library[self.first_tier]
+        opener = first_block(self.library[self.first_tier])
+        left = len(records)
         for rec in records.values():
-            run_workflow(ctx, rec, first_block(opener))
+            left -= 1
+            expected = self.model.rollout(rec.meta, State(), opener, 0.0).cost
+            run_workflow(ctx, rec, self._paced_opening(meter, rec, opener, expected, left))
         ranked = sorted((r for r in records.values() if not r.closed),
                         key=lambda r: r.s_held)
         chain = parse_chain(self.escalation)
         for rec in ranked:
             if not self.grammar.is_wellformed(chain, rec.state):
                 continue
+            # every question of this group holds an answer; pacing still covers
+            # the batch's later questions when groups share a meter
+            expected = self.model.rollout(rec.meta, rec.state, chain, rec.s_held).cost
+            if not self._paced(meter, expected, 0):
+                break
             before = meter.stats.launched
             run_workflow(ctx, rec, chain)
             if meter.stats.refused and meter.stats.launched == before:
@@ -133,11 +166,15 @@ class VineLMStyle(Method):
     profiles: dict[str, Profile] = field(default_factory=dict)
     specs: tuple[str, ...] = DEFAULT_CONTINUATIONS
 
+    def _opening_library(self) -> dict[str, Workflow]:
+        """The workflows a request may open with."""
+        return _openers(self.library)
+
     def prepare(self, corpus, train_dbs) -> "VineLMStyle":
         super().prepare(corpus, train_dbs)
-        self.profiles = profile_library(corpus, train_dbs, _openers(self.library))
-        self.table = profile_continuations(corpus, train_dbs, _openers(self.library),
-                                           self.specs)
+        openers = self._opening_library()
+        self.profiles = profile_library(corpus, train_dbs, openers)
+        self.table = profile_continuations(corpus, train_dbs, openers, self.specs)
         return self
 
     def run(self, metas, budget, meter=None) -> RunResult:
@@ -149,10 +186,13 @@ class VineLMStyle(Method):
         opener_name = max(
             (n for n, p in self.profiles.items() if p.n and np.all(p.cost <= per_q)),
             key=lambda n: self.profiles[n].acc, default="S")
-        opener = self.library[opener_name]
+        opener = first_block(self.library[opener_name])
 
+        left = len(records)
         for rec in records.values():
-            run_workflow(ctx, rec, first_block(opener))
+            left -= 1
+            run_workflow(ctx, rec, self._paced_opening(
+                meter, rec, opener, self.profiles[opener_name].cost, left))
             if rec.closed:
                 continue
             obs = rec.state.answer_obs or "-"
@@ -164,6 +204,8 @@ class VineLMStyle(Method):
                     continue
                 prof = lookup(self.table, opener_name, obs, spec)
                 if prof is None or np.any(prof.cost > room):
+                    continue
+                if not self._paced(meter, prof.cost, left):
                     continue
                 if prof.acc > base:
                     base, best = prof.acc, spec

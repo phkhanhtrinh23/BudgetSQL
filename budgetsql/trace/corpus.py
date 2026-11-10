@@ -5,8 +5,8 @@ import random
 from dataclasses import dataclass
 import numpy as np
 
-from ..features import Observables, QuestionMeta, phi
-from ..grammar import ANSWER_PRODUCING, Grammar, Stage, State, Workflow
+from ..features import QuestionMeta, phi
+from ..grammar import ANSWER_PRODUCING, REPLACING, Grammar, Stage, State, Workflow
 from .base import StageOutcome, TraceSource
 
 
@@ -25,11 +25,9 @@ class TrainingRow:
         return self.meta.db
 
     def features(self, use_question: bool = True, use_execution: bool = True) -> np.ndarray:
-        return phi(self.meta, self.state, self.state_observables(),
-                   use_question=use_question, use_execution=use_execution)
-
-    def state_observables(self) -> Observables:
-        return Observables()
+        """``phi`` of the row's state, its observables included."""
+        return phi(self.meta, self.state, use_question=use_question,
+                   use_execution=use_execution)
 
 
 class TraceCorpus:
@@ -73,7 +71,8 @@ class TraceCorpus:
         """Execute ``wf`` from ``state`` on the recorded branches.
 
         ``select(state, stage, outcome)`` decides whether a replacing stage's
-        answer is kept; the default keeps it.  Returns the state reached, the
+        answer is kept; the default keeps it.  A rejected answer leaves the
+        earlier one held, on its own branch.  Returns the state reached, the
         correctness of the answer held, the cost and the outcomes.
         """
         cost = np.zeros(3)
@@ -87,11 +86,14 @@ class TraceCorpus:
             out.held_before = held
             cost = cost + out.cost
             outs.append(out)
-            if stage.kind in ANSWER_PRODUCING:
-                keep = True if select is None else bool(select(state, stage, out))
-                if keep or held is None:
-                    held = out.answer_correct
-            state = state.append(stage, out.obs)
+            keep = True
+            if stage.kind in REPLACING and state.has_answer and select is not None:
+                keep = bool(select(state, stage, out))
+            elif select is not None and hasattr(select, "observe"):
+                select.observe(state, stage, out)      # Bayes on what it observed
+            if stage.kind in ANSWER_PRODUCING and (keep or held is None):
+                held = out.answer_correct
+            state = state.append(stage, out.obs, keep=keep, values=out)
             node = node.child(out.obs)
         return state, bool(held), cost, outs
 
@@ -120,9 +122,13 @@ class TraceCorpus:
                 out.held_before = held
                 rows.append(TrainingRow(meta, state, stage, out, held))
                 nxt_held = out.answer_correct if stage.kind in ANSWER_PRODUCING else held
-                nxt = state.append(stage, out.obs)
                 if seen + len(frontier) < self.max_states:
-                    frontier.append((nxt, nxt_held))
+                    frontier.append((state.append(stage, out.obs, values=out), nxt_held))
+                # the branch on which Select rejected the new answer
+                if (stage.kind in REPLACING and state.has_answer
+                        and seen + len(frontier) < self.max_states):
+                    frontier.append((state.append(stage, out.obs, keep=False, values=out),
+                                     held))
         return rows
 
     def __len__(self) -> int:

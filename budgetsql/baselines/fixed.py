@@ -6,7 +6,10 @@ group's budget in every dimension.  ``BestFixedWorkflow`` picks one workflow the
 same way, from the one-shot workflows of the reference table and the pruned
 ``M_c+R_L``.  ``OmniRouterStyle`` couples the batch in one
 linear program, but solves it once on predictions made before any answer exists.
-``Oracle`` is the hindsight optimum of the same relaxation with true outcomes.
+``Oracle`` is the hindsight optimum of the same relaxation with true outcomes:
+it reports the relaxation's value, not a rounded plan's.
+
+All but the oracle run under the shared pacing rule (``Method._paced``).
 """
 from __future__ import annotations
 
@@ -71,15 +74,12 @@ class BestFixedMixture(Method):
 
         ctx = self._ctx(meter)
         from ..planner.execute import run_workflow
-        left = len(order)
-        for qid in order:
+        arrival = list(records)
+        for i, qid in enumerate(arrival):
             rec = records[qid]
-            left -= 1
             wf = plan[qid]
             mean = self.profiles[wf.name or ""].cost if (wf.name in self.profiles) else zeros()
-            if left and np.any(mean > self._pace(meter, left + 1)):
-                cheap = self._cheapest(rec.state)
-                wf = cheap if cheap is not None else wf
+            wf = self._paced_opening(meter, rec, wf, mean, len(arrival) - i - 1)
             run_workflow(ctx, rec, wf)
         predicted = float(sum(self.profiles[n].acc * s for n, s in shares.items()))
         return self._result(records, meter, predicted)
@@ -123,13 +123,9 @@ class BestFixedWorkflow(Method):
 
         from ..planner.execute import run_workflow
         ctx = self._ctx(meter)
-        left = len(records)
-        for rec in records.values():
-            left -= 1
-            run = wf
-            if left and np.any(mean > self._pace(meter, left + 1)):
-                cheap = self._cheapest(rec.state)
-                run = cheap if cheap is not None else wf
+        recs = list(records.values())
+        for i, rec in enumerate(recs):
+            run = self._paced_opening(meter, rec, wf, mean, len(recs) - i - 1)
             run_workflow(ctx, rec, run)
         return self._result(records, meter, self.profiles[self.choice].acc)
 
@@ -166,23 +162,34 @@ class OmniRouterStyle(Method):
         alloc = solve(cands, np.asarray(budget, dtype=float))
         from ..planner.execute import run_workflow
         ctx = self._ctx(meter)
-        for qid, cand in alloc.chosen().items():
-            if cand.payload is not None:
-                run_workflow(ctx, records[qid], cand.payload)
+        chosen = alloc.chosen()
+        recs = list(records.values())
+        for i, rec in enumerate(recs):
+            cand = chosen.get(rec.qid)
+            if cand is None or cand.payload is None:
+                continue
+            wf = self._paced_opening(meter, rec, cand.payload, cand.cost,
+                                     len(recs) - i - 1)
+            run_workflow(ctx, rec, wf)
         n = max(1, len(metas))
         return self._result(records, meter, alloc.value / n, [alloc.duals])
 
 
 @dataclass
 class Oracle(Method):
-    """The hindsight optimum: the same relaxation with the outcomes the trace
-    actually produced."""
+    """The hindsight optimum of the linear relaxation: the same program with
+    the outcomes and costs the trace actually produced.  Its accuracy is the
+    relaxation's value, so a question split between workflows counts with the
+    mixture of their outcomes; nothing is rounded or executed."""
 
     name: str = "oracle"
 
     def run(self, metas, budget, meter=None) -> RunResult:
+        """The value of the linear relaxation at the true outcomes and costs.
+        A question's entry in ``correct`` is its fractional value
+        ``sum_w x_iw Y_iw``, so the reported accuracy is the relaxation's
+        optimum, not that of a rounded plan."""
         meter = meter or Meter(budget)
-        records = self._records(metas)
         cands: list[Candidate] = []
         for m in metas:
             for name, wf in self.library.items():
@@ -192,10 +199,13 @@ class Oracle(Method):
             cands.append(Candidate(m.qid, "stop", 0.0, zeros(), zeros(), zeros(),
                                    is_stop=True, payload=None))
         alloc = solve(cands, np.asarray(budget, dtype=float))
-        from ..planner.execute import run_workflow
-        ctx = self._ctx(meter)
-        for qid, cand in alloc.chosen().items():
-            if cand.payload is not None:
-                run_workflow(ctx, records[qid], cand.payload)
+        correct = {m.qid: 0.0 for m in metas}
+        for c, xv in zip(alloc.candidates, alloc.x):
+            if xv > 0:
+                correct[c.qid] += float(xv) * float(c.value)
         n = max(1, len(metas))
-        return self._result(records, meter, alloc.value / n, [alloc.duals])
+        return RunResult(
+            accuracy=alloc.value / n, correct=correct, spend=alloc.spend.copy(),
+            budget=np.asarray(budget, dtype=float).copy(), meter=meter.snapshot(),
+            duals_history=[alloc.duals], predicted_accuracy=alloc.value / n,
+            n_questions=len(metas))

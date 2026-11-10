@@ -1,11 +1,13 @@
 """The fixed-size summary of a batch that the agent reads.
 
 The agent never reads the questions.  They are grouped into cells by database,
-by what their first stage observed and by deciles of predicted success and cost;
-each cell reports its size, the predictions for its current candidates with
-their spread, and the drift between its predicted and realised costs.  The
-digest also carries the remaining budget, what planning has spent so far and the
-dual prices of the last allocation, which say which dimension binds.
+by what their first stage observed and by deciles of predicted success and
+predicted cost; each cell reports its size, the predictions for its current
+candidates with their spread, and the drift between its predicted and realised
+costs.  A cell is flagged when that drift, or the shift of its observation
+shares from their predictions, exceeds the drift threshold.  The digest also
+carries the remaining budget, what planning has spent so far and the dual
+prices of the last allocation, which say which dimension binds.
 
 The number of cells is capped, so the digest's size does not grow with the
 batch: while there are too many, two cells are merged --- within a database when
@@ -42,21 +44,32 @@ class DigestCell:
     uncertain: bool = False
     flagged: bool = False
     candidates: list[CellCandidate] = field(default_factory=list)
+    #: The planner cells a merged digest cell stands for; the tools act on them.
+    members: list[str] = field(default_factory=list)
+    #: The short name the agent reads and the tools take (``c01``).
+    alias: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.members:
+            self.members = [self.cid]
 
     @property
     def size(self) -> int:
         return len(self.qids)
 
     def line(self) -> str:
-        cand = "; ".join(
-            f"{c.wf_id} p={c.p:.2f} "
-            f"${c.cost[0] * 1e3:.2f}/k tok={c.cost[1]:.0f} s={c.cost[2]:.1f}"
+        """One line per cell: its alias and flags, database, first-stage
+        observation and size, the held answers' predicted success with its
+        spread, the cost drift, and its best candidates as compact chains
+        with predicted success and money (m$), tokens and seconds."""
+        cand = " ".join(
+            f"{c.wf_id}:{c.p:.2f}/{c.cost[0] * 1e3:.2f}/{c.cost[1]:.0f}/{c.cost[2]:.1f}"
             + ("?" if c.uncertain else "")
-            for c in self.candidates[:4]) or "none"
+            for c in self.candidates[:3]) or "-"
         flags = ("!" if self.flagged else "") + ("?" if self.uncertain else "")
-        return (f"{self.cid}{flags} db={self.db} obs={self.obs} n={self.size} "
-                f"s={self.s_mean:.2f}+-{self.s_spread:.2f} "
-                f"drift={self.drift[0]:+.0%}/{self.drift[1]:+.0%}/{self.drift[2]:+.0%} "
+        return (f"{self.alias or self.cid}{flags} {self.db} {self.obs} n={self.size} "
+                f"s={self.s_mean:.2f}~{self.s_spread:.2f} "
+                f"d={self.drift[0]:+.0%}/{self.drift[1]:+.0%}/{self.drift[2]:+.0%} "
                 f"| {cand}")
 
 
@@ -73,10 +86,28 @@ class Digest:
     turns_left: int = 0
 
     def cell(self, cid: str) -> DigestCell | None:
+        """A cell by its alias or its id."""
         for c in self.cells:
-            if c.cid == cid:
+            if c.alias == cid or c.cid == cid:
                 return c
         return None
+
+    def fit(self, max_tokens: int, max_cells: int, count=None) -> "Digest":
+        """The digest the agent reads: at most ``max_cells`` cells, flagged
+        cells first, each named by a short alias, and merged further until
+        the text fits ``max_tokens``, so the digest's size, and so a turn's
+        prompt, does not grow with the batch.  No cell is dropped."""
+        count = count or approx_tokens
+        cells = merge_cells(list(self.cells), max_cells)
+        while True:
+            cells = sorted(cells, key=lambda c: (not c.flagged, c.db, c.obs, -c.size))
+            for i, c in enumerate(cells):
+                c.alias = f"c{i + 1:02d}"
+            out = Digest(cells, self.remaining, self.spent, self.planning, self.duals,
+                         self.budget, self.n_open, self.turns_used, self.turns_left)
+            if len(cells) <= 1 or count(out.to_text()) <= max_tokens:
+                return out
+            cells = merge_cells(cells, len(cells) - 1)
 
     @property
     def flagged(self) -> list[DigestCell]:
@@ -86,6 +117,7 @@ class Digest:
         return [k for k, v in zip(DIMS, self.duals) if v > 0]
 
     def to_text(self) -> str:
+        """The digest as the agent reads it (``fit`` bounds its size)."""
         head = [
             "BATCH DIGEST",
             f"open questions: {self.n_open} in {len(self.cells)} cells",
@@ -96,9 +128,16 @@ class Digest:
             "dual prices: " + ", ".join(f"{k}={v:.4g}" for k, v in zip(DIMS, self.duals)),
             f"binding: {', '.join(self.binding()) or 'none'}",
             f"turns: {self.turns_used} used, {self.turns_left} left",
-            "cells (! flagged, ? thin support):",
+            "cells: alias(! flagged, ? thin support) db obs n s=mean~spread "
+            "d=cost drift $/tok/s | candidate:p/m$/tok/s",
         ]
         return "\n".join(head + ["  " + c.line() for c in self.cells])
+
+
+def approx_tokens(text: str) -> int:
+    """A conservative token count (three characters a token, where tokenizers
+    average about four), so a reservation made from it covers the prompt."""
+    return -(-len(text) // 3)
 
 
 def merge_cells(cells: list[DigestCell], max_cells: int) -> list[DigestCell]:
@@ -137,7 +176,9 @@ def _merge(a: DigestCell, b: DigestCell) -> DigestCell:
         drift=wa * a.drift + wb * b.drift,
         uncertain=a.uncertain or b.uncertain,
         flagged=a.flagged or b.flagged,
+        members=a.members + b.members,
     )
+    out.alias = a.alias
     seen: dict[str, CellCandidate] = {}
     for c in a.candidates + b.candidates:
         got = seen.get(c.wf_id)

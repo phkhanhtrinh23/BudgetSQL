@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from ..features import QuestionMeta
-from ..grammar import Stage, State
+from ..grammar import REPLACING, Stage, State
 from .base import StageOutcome
 
 BRANCH_SEP = ";"
@@ -129,4 +129,7 @@ def materialise(source, questions: Iterable[QuestionMeta], grammar,
                 here[stage.id] = out
                 if seen + len(frontier) < max_states:
                     frontier.append(state.append(stage, out.obs))
+                if (stage.kind in REPLACING and state.has_answer
+                        and seen + len(frontier) < max_states):
+                    frontier.append(state.append(stage, out.obs, keep=False))
         yield meta, branches

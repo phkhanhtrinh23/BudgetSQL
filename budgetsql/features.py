@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .config import TIERS
-from .grammar import CTX_LEVELS, EXEC_STATUS, Stage, State
+from .grammar import CTX_LEVELS, EXEC_STATUS, Observables, Stage, State
 
 STAGE_KINDS = ("context", "generate", "execute", "repair", "verify", "escalate")
 
@@ -62,23 +62,18 @@ QUESTION_SLICE = slice(0, len(QUESTION_COLUMNS))
 HISTORY_SLICE = slice(len(QUESTION_COLUMNS), N_FEATURES)
 
 
-@dataclass
-class Observables:
-    """Numeric parts of an observation.  In a rollout they are imputed by their
-    training mean given the stage and the observation."""
 
-    n_distinct: float = 1.0
-    completion_tokens: float = 0.0
-    earlier_equal: float = 0.0
-    n_earlier: float = 0.0
 
 
 def phi(meta: QuestionMeta, state: State, obs: Observables | None = None,
         use_question: bool = True, use_execution: bool = True) -> np.ndarray:
-    """Feature vector of a state.  ``use_question`` / ``use_execution`` drop one
+    """Feature vector of a state: the question part, fixed before anything
+    runs, and the history part, including the held answer's observables (the
+    agreement of its samples, its completion's length and the agreement of
+    earlier answers with it).  ``use_question`` / ``use_execution`` drop one
     part of the summary for the world-model input ablations."""
     x = np.zeros(N_FEATURES, dtype=float)
-    obs = obs or Observables()
+    obs = obs or state.observables
 
     if use_question:
         x[IDX["q.log_question_tok"]] = _log1p(meta.n_question_tokens)

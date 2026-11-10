@@ -40,7 +40,7 @@ class ChatClient:
     # ---- the call ----
     def chat(self, messages: list[dict], max_tokens: int = 600,
              temperature: float = 0.0, timeout: float | None = None,
-             n: int = 1, seed: int | None = None) -> dict:
+             n: int = 1, seed: int | None = None, retries: int | None = None) -> dict:
         body = {"model": self.model, "messages": messages,
                 "max_completion_tokens": int(max_tokens)}
         if n > 1:
@@ -58,7 +58,7 @@ class ChatClient:
             headers["Authorization"] = f"Bearer {key}"
         url = self.base_url.rstrip("/") + "/chat/completions"
         last = ""
-        for attempt in range(self.retries):
+        for attempt in range(self.retries if retries is None else max(1, retries)):
             started = time.time()
             try:
                 req = urllib.request.Request(url, data, headers)

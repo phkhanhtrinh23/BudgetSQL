@@ -3,11 +3,15 @@
 Methods are run on the same question orders and replay the same recorded
 outcomes, so their runs are paired.  A comparison's gain on a unit (a database,
 or a fold of databases) is the mean over the paired runs of the difference in
-accuracy on that unit, and the mean lead weights units by their questions.  The
-standard error adds the bootstrap variance over units to the variance of the
-answers on which the two methods differ, so it is never smaller than the paired
-standard error.  A lead's interval uses Student's t on the units; a contrast
-between two arms of the same method uses the paired standard error alone.
+accuracy on that unit, and the mean lead weights units by their questions.  A
+lead's standard error adds the bootstrap variance over units and the variance
+of the modelled effects (Sec. VII-A), and its interval uses Student's t on the
+units.  A contrast between two arms of the same method (ablation, online) uses
+the paired standard error, plus the effects' variance when only one arm
+carries them.
+
+A run maps each question to its correctness; a relaxation (the oracle) maps it
+to a fractional value in [0, 1].
 """
 from __future__ import annotations
 
@@ -67,69 +71,76 @@ def paired_se(differ: float, n: int) -> float:
     return float(np.sqrt(max(0.0, differ) / n))
 
 
+def _v(x) -> float:
+    return float(x) if x is not None else 0.0
+
+
 def lead(a_runs: list[dict[str, bool]], b_runs: list[dict[str, bool]],
-         unit_of: dict[str, str], resamples: int = 4000, seed: int = 0) -> Lead:
+         unit_of: dict[str, str], resamples: int = 4000, seed: int = 0,
+         offset: float = 0.0, offset_var: float = 0.0) -> Lead:
     """The lead of ``a`` over ``b`` in accuracy points.
 
     Each element of ``a_runs``/``b_runs`` maps a question to whether that run
-    answered it correctly.
+    answered it correctly.  ``offset`` (points) and ``offset_var`` (points
+    squared) are the modelled effects ``a`` carries beyond its replay minus
+    those ``b`` carries; the offset shifts every unit's gain and its variance
+    enters the standard error.
     """
     assert len(a_runs) == len(b_runs) and a_runs, "runs must be paired"
     qids = sorted(set(unit_of))
     units = sorted(set(unit_of.values()))
     per_unit: dict[str, list[float]] = {u: [] for u in units}
     weights: dict[str, float] = {u: 0.0 for u in units}
-    differ = 0.0
-    total = 0
     for ra, rb in zip(a_runs, b_runs):
         by_unit: dict[str, list[float]] = {u: [] for u in units}
         for q in qids:
             u = unit_of[q]
-            da = 1.0 if ra.get(q) else 0.0
-            db = 1.0 if rb.get(q) else 0.0
+            da = _v(ra.get(q))
+            db = _v(rb.get(q))
             by_unit[u].append(da - db)
-            differ += 1.0 if da != db else 0.0
-            total += 1
         for u, vals in by_unit.items():
             if vals:
                 per_unit[u].append(float(np.mean(vals)))
-    gains = {u: float(np.mean(v)) * 100.0 for u, v in per_unit.items() if v}
+    gains = {u: float(np.mean(v)) * 100.0 + float(offset)
+             for u, v in per_unit.items() if v}
     for q in qids:
         weights[unit_of[q]] = weights.get(unit_of[q], 0.0) + 1.0
     wsum = sum(weights.get(u, 0.0) for u in gains) or 1.0
     mean = sum(gains[u] * weights.get(u, 0.0) for u in gains) / wsum
     se_units = bootstrap_units(gains, weights, resamples, seed)
-    se_paired = paired_se(differ / max(1, total), len(qids)) * 100.0
-    se = float(np.sqrt(se_units ** 2 + se_paired ** 2))
+    se = float(np.sqrt(se_units ** 2 + max(0.0, offset_var)))
     wins = sum(1 for u in gains if gains[u] > 0)
     half = t_quantile(len(gains)) * se
     return Lead(mean, se, mean - half, mean + half, wins, len(gains))
 
 
-def accuracy(runs: list[dict[str, bool]]) -> tuple[float, float]:
-    """Mean accuracy in points over the runs, with its spread."""
-    means = [100.0 * np.mean([1.0 if v else 0.0 for v in r.values()]) for r in runs if r]
+def accuracy(runs: list[dict[str, bool]], offset: float = 0.0) -> tuple[float, float]:
+    """Mean accuracy in points over the runs, with its spread; ``offset`` adds
+    a modelled effect in points."""
+    means = [100.0 * np.mean([_v(v) for v in r.values()]) for r in runs if r]
     if not means:
         return 0.0, 0.0
-    return float(np.mean(means)), float(np.std(means))
+    return float(np.mean(means)) + float(offset), float(np.std(means))
 
 
-def paired_contrast(a_runs: list[dict[str, bool]], b_runs: list[dict[str, bool]]
-                    ) -> Lead:
+def paired_contrast(a_runs: list[dict[str, bool]], b_runs: list[dict[str, bool]],
+                    offset: float = 0.0, offset_var: float = 0.0) -> Lead:
     """A contrast between two arms of the same method on the same units and
-    orders, which uses the paired standard error alone."""
+    orders, which uses the paired standard error alone, plus the variance of
+    the modelled effects that differ between the arms."""
     qids = sorted(set().union(*[set(r) for r in a_runs + b_runs]))
     diffs, differ = [], 0.0
     for ra, rb in zip(a_runs, b_runs):
         d = []
         for q in qids:
-            da = 1.0 if ra.get(q) else 0.0
-            db = 1.0 if rb.get(q) else 0.0
+            da = _v(ra.get(q))
+            db = _v(rb.get(q))
             d.append(da - db)
-            differ += 1.0 if da != db else 0.0
+            differ += abs(da - db)
         diffs.append(float(np.mean(d)))
-    mean = float(np.mean(diffs)) * 100.0
+    mean = float(np.mean(diffs)) * 100.0 + float(offset)
     se = paired_se(differ / max(1, len(qids) * len(a_runs)), len(qids)) * 100.0
+    se = float(np.sqrt(se ** 2 + max(0.0, offset_var)))
     half = 1.96 * se
     return Lead(mean, se, mean - half, mean + half,
                 sum(1 for d in diffs if d > 0), len(diffs))

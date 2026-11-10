@@ -7,7 +7,7 @@ from typing import Protocol
 import numpy as np
 
 from ..config import DIMS, zeros
-from ..features import Observables, QuestionMeta
+from ..features import QuestionMeta
 from ..grammar import Stage, State
 
 
@@ -39,12 +39,6 @@ class StageOutcome:
     @property
     def is_regression(self) -> bool:
         return (self.answer_correct is False) and (self.held_before is True)
-
-    def observables(self) -> Observables:
-        return Observables(n_distinct=self.n_distinct,
-                           completion_tokens=self.completion_tokens,
-                           earlier_equal=1.0 if self.equal_to_held else 0.0,
-                           n_earlier=1.0)
 
     def to_json(self) -> dict:
         return {

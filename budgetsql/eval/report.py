@@ -144,11 +144,11 @@ def online(res: dict) -> str:
         cells = [str(r["day"])]
         cells += [f"{r[a]['accuracy']:.2f}" if a in r else "-" for a in arms]
         cells += [f"{r.get(f'gain_{a}', 0.0):+.2f}" for a in arms[1:]]
-        cells.append(f"{r['updated']['cancelled']}")
+        cells.append(f"{r['updated']['cancelled_per_1k']:.1f}")
         rows.append(cells)
     return ("Online cost updates, within-batch recalibration and late labels\n"
             + table(["day"] + list(arms) + [f"gain {a}" for a in arms[1:]]
-                    + ["cuts"], rows))
+                    + ["cancelled/1k"], rows))
 
 
 def scenarios(res: dict) -> str:
@@ -169,10 +169,10 @@ def library(rows: list[dict]) -> str:
 
 
 def sweep(res: dict) -> str:
-    scales = res["scales"]
+    money = res["money"]
     rows = [[m] + [f"{v:.2f}" for v in curve] for m, curve in res["curves"].items()]
-    return ("Accuracy against the money budget (multiples of "
-            f"{res['base']})\n" + table(["method"] + [f"x{s:g}" for s in scales], rows))
+    return ("Accuracy against the money budget, tokens and time unbounded\n"
+            + table(["method"] + [f"{u * 1e3:g} m$" for u in money], rows))
 
 
 def grid(res: dict) -> str:

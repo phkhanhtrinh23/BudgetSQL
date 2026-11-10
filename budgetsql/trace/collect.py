@@ -24,7 +24,7 @@ from ..executors.llm import ChatClient, extract_sql
 from ..executors.schema import Schema, prune, read_schema, render
 from ..executors.sql import ExecResult, execute, matches
 from ..features import QuestionMeta
-from ..grammar import Grammar, Stage, State
+from ..grammar import REPLACING, Grammar, Stage, State
 from .base import StageOutcome
 from .recorded import branch_key, write_jsonl
 
@@ -136,6 +136,15 @@ class Collector:
         self._samples[key] = out
         return out
 
+    def _executed(self, q: Question, draw: dict) -> ExecResult:
+        """A sample's SQL executed once; Generate executes it only to score the
+        trace, and the Execute stage is what is charged for it."""
+        got = draw.get("exec")
+        if got is None:
+            got = execute(q.db_path, draw["sql"], self.sql_timeout)
+            draw["exec"] = got
+        return got
+
     def run_stage(self, q: Question, ref: ExecResult, state: State, stage: Stage,
                   held: _Answer | None) -> tuple[StageOutcome, _Answer | None]:
         """Run one stage and return its record and the answer held after it."""
@@ -148,13 +157,13 @@ class Collector:
                      for i in range(stage.samples)]
             answers = []
             for d in draws:
-                res = execute(q.db_path, d["sql"], self.sql_timeout)
+                res = self._executed(q, d)
                 answers.append(_Answer(d["sql"], res, matches(res, ref)))
             pick = _vote(answers)
+            # the calls only: running the SQL is the Execute stage's cost
             cost = vec(sum(d["usd"] for d in draws),
                        sum(d["prompt_tokens"] + d["completion_tokens"] for d in draws),
-                       sum(d["latency"] for d in draws)
-                       + sum(a.result.seconds for a in answers))
+                       sum(d["latency"] for d in draws))
             worst = _worst(draws, stage)
             out = StageOutcome("ok", cost, worst, answer_correct=pick.correct,
                                n_distinct=float(len({_key(a) for a in answers})),
@@ -168,6 +177,8 @@ class Collector:
                 return StageOutcome("error", vec(0, 0, 0.0), vec(0, 0, 0.0)), held
             status = held.result.status
             obs = status
+            seconds = held.result.seconds
+            n_distinct = 1.0
             if stage.samples > 1:
                 used = sum(s.samples for s, _ in state.history
                            if s.tier == state.answer_stage.tier) - stage.samples
@@ -175,11 +186,16 @@ class Collector:
                                       state.answer_stage.ctx,
                                       state.answer_stage.cap, used + i)
                          for i in range(stage.samples)]
-                keys = {extract_sql(d["text"]) for d in draws}
+                results = [self._executed(q, d) for d in draws]
+                # samples agree when their results agree, as the vote counts them
+                from ..executors.sql import result_key
+                keys = {result_key(r.rows) for r in results}
+                n_distinct = float(len(keys))
                 obs = f"{status}.{'agree' if len(keys) == 1 else 'split'}"
-            return StageOutcome(obs, vec(0, 0, held.result.seconds),
-                                vec(0, 0, self.sql_timeout),
-                                n_distinct=1.0), held
+                seconds = sum(r.seconds for r in results)
+            return StageOutcome(obs, vec(0, 0, seconds),
+                                vec(0, 0, self.sql_timeout * stage.samples),
+                                n_distinct=n_distinct), held
 
         if stage.kind == "verify":
             if held is None:
@@ -246,6 +262,11 @@ class Collector:
                 here[stage.id] = out
                 if seen + len(frontier) < self.max_states:
                     frontier.append((state.append(stage, out.obs), new_held))
+                # the branch on which Select rejects the new answer keeps the
+                # old one held, so later stages read it
+                if (stage.kind in REPLACING and held is not None
+                        and seen + len(frontier) < self.max_states):
+                    frontier.append((state.append(stage, out.obs, keep=False), held))
         return meta, branches
 
     # ---- a corpus ----

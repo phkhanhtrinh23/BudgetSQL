@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import random
 import time
+from dataclasses import dataclass
 
 import numpy as np
 from sklearn.metrics import roc_auc_score
@@ -14,16 +15,44 @@ from sklearn.metrics import roc_auc_score
 from ..analysis.escalation import frontier, stats as esc_stats
 from ..baselines import BASELINES
 from ..baselines.agents import ProfiledPerRequest
-from ..config import (DIMS, GRID_AXES, GRID_SLACK, PlannerConfig,
-                      budget_for_group)
+from ..config import (BUDGETS, DIMS, GRID_AXES, GRID_SLACK, SWEEP_MONEY,
+                      PlannerConfig, budget_for_group)
 from ..config import zeros
-from ..grammar import State, parse_chain
+from ..grammar import STOP, State, parse_chain
 from ..planner import Meter
 from ..planner.allocation import Candidate, solve
+from ..worldmodel.stacking import selector
+from .effects import Effect
 from .runner import BudgetGroup, Workbench
 from .stats import accuracy, lead, paired_contrast
 
 PLANNER = "budgetsql"
+
+
+def _eff(res: dict) -> Effect:
+    e = res.get("effect") or {}
+    return Effect(float(e.get("mean", 0.0)), float(e.get("var", 0.0)))
+
+
+def _acc(res: dict) -> tuple[float, float]:
+    """A result's accuracy in points, its modelled effect included."""
+    return accuracy(res["runs"], _eff(res).mean)
+
+
+def _lead(a: dict, b: dict, unit_of: dict) -> object:
+    """The lead of result ``a`` over ``b``, each with its modelled effect."""
+    ea, eb = _eff(a), _eff(b)
+    return lead(a["runs"], b["runs"], unit_of, offset=ea.mean - eb.mean,
+                offset_var=ea.var + eb.var)
+
+
+def _contrast(a: dict, b: dict) -> object:
+    """A paired contrast between two arms; a modelled effect both arms carry
+    cancels, one that only one arm carries adds its variance."""
+    ea, eb = _eff(a), _eff(b)
+    same = ea.mean == eb.mean and ea.var == eb.var
+    return paired_contrast(a["runs"], b["runs"], offset=ea.mean - eb.mean,
+                           offset_var=0.0 if same else ea.var + eb.var)
 
 
 # --------------------------------------------------------------------------- #
@@ -40,29 +69,49 @@ def default_methods(bench: Workbench) -> list[str]:
     return [m for m in BASELINES if m not in BIRD_ONLY]
 
 
+#: Agent baselines whose BIRD rows are derived rather than replayed directly.
+DERIVED_AGENTS = ("llm_agent", "llm_agent_dry_runs")
+
+
 def main_table(bench: Workbench, methods: list[str] | None = None,
                budgets: list[str] | None = None, runs: int | None = None,
                oracle: bool = True) -> dict:
+    """Tab. IV.  The strongest baseline is the most accurate row, derived rows
+    included; the interval does not correct for that selection."""
     methods = methods or default_methods(bench)
-    if oracle:
-        methods = methods + ["oracle"]
     budgets = budgets or list(bench.workload.budgets)
     unit_of = bench.unit_of()
-    out: dict = {"budgets": {}, "methods": [PLANNER] + methods}
+    derive = bench.workload.budget_groups == "db"
+    replayed = [m for m in methods if not (derive and m in DERIVED_AGENTS)]
+    derived = derived_agent_rows(bench, [m for m in methods if derive and m in DERIVED_AGENTS],
+                                 budgets, runs) if derive else {}
+    out: dict = {"budgets": {}, "methods": [PLANNER] + methods
+                 + (["oracle"] if oracle else []),
+                 "derived": sorted(derived)}
     for b in budgets:
         ours = bench.run_method(PLANNER, b, runs)
+        results = {name: bench.run_method(name, b, runs) for name in replayed}
+        for name, per_budget in derived.items():
+            results[name] = per_budget[b]
         rows: dict[str, dict] = {}
-        for name in methods:
-            res = bench.run_method(name, b, runs)
-            acc, spread = accuracy(res["runs"])
+        for name, res in results.items():
+            acc, spread = _acc(res)
             rows[name] = {"accuracy": acc, "spread": spread,
-                          "lead_over": lead(ours["runs"], res["runs"], unit_of).as_dict(),
-                          "utilisation": _mean_util(res["details"])}
-        acc, spread = accuracy(ours["runs"])
+                          "lead_over": _lead(ours, res, unit_of).as_dict(),
+                          "utilisation": _mean_util(res.get("details", [])),
+                          "derived": name in derived}
+        if oracle:
+            res = bench.run_method("oracle", b, runs)
+            acc, spread = _acc(res)
+            rows["oracle"] = {"accuracy": acc, "spread": spread,
+                              "lead_over": _lead(ours, res, unit_of).as_dict(),
+                              "utilisation": _mean_util(res["details"])}
+        acc, spread = _acc(ours)
         ranked = {n: r for n, r in rows.items() if n != "oracle"}
         best = max(ranked, key=lambda n: ranked[n]["accuracy"]) if ranked else None
         out["budgets"][b] = {
             "planner": {"accuracy": acc, "spread": spread,
+                        "modelled_effect": ours["effect"],
                         "utilisation": _mean_util(ours["details"]),
                         "planning_share": _mean_planning(ours["details"]),
                         "binding_fraction": _mean_binding(ours["details"]),
@@ -74,19 +123,79 @@ def main_table(bench: Workbench, methods: list[str] | None = None,
     return out
 
 
+def derived_agent_rows(bench: Workbench, agents: list[str], budgets: list[str],
+                       runs: int | None = None, base: str = "vinelm_style",
+                       anchor: str = "V1") -> dict[str, dict[str, dict]]:
+    """The BIRD rows of the LLM-agent baselines (Sec. VII-A) at named budget
+    vectors (``derived_agent_at``)."""
+    return {name: {b: derived_agent_at(bench, name, b, None, runs, base, anchor)
+                   for b in budgets} for name in agents}
+
+
+def derived_agent_at(bench: Workbench, name: str, budget: str | None, vector=None,
+                     runs: int | None = None, base: str = "vinelm_style",
+                     anchor: str = "V1") -> dict:
+    """An LLM-agent row on BIRD: the VineLM-style planner's replayed accuracy
+    at the vector, plus the replayed agent's offset from it in V1, less the
+    cost of the agent's turns.
+
+    The offset is measured with the agent's turns taken but neither reserved
+    nor charged (``free_turns``), so their cost is not counted twice; the cost
+    of the turns at a vector is what the VineLM-style planner loses when its
+    budget shrinks by what the agent's turns spent per question in the V1
+    replay.  The row is the VineLM-style runs carrying that scalar, whose
+    variance is the offset's paired variance.  The V1 quantities are measured
+    once per workbench."""
+    cache = bench.__dict__.setdefault("_derived_anchor", {})
+    key = (name, base, anchor, runs)
+    if key not in cache:
+        base_v1 = bench.run_method(base, anchor, runs)
+        free = bench.run_method(name, anchor, runs, cfg=bench.cfg.with_(free_turns=True))
+        charged = bench.run_method(name, anchor, runs)
+        off = paired_contrast(free["runs"], base_v1["runs"])
+        n = sum(g.size for g in bench.groups())
+        per_q = _planning_spend(charged["details"]) / max(1, n) / max(1, len(charged["runs"]))
+        cache[key] = (off, per_q, charged["details"])
+    off, per_q, details = cache[key]
+    vec_b = np.asarray(BUDGETS[budget] if vector is None else vector, dtype=float)
+    here = bench.run_method(base, budget, runs, vector=vector)
+    shrunk = bench.run_method(base, budget, runs, vector=np.maximum(vec_b - per_q, 0.0))
+    turn_cost = _acc(here)[0] - _acc(shrunk)[0]
+    return {"method": name, "budget": budget, "runs": here["runs"],
+            "details": details if (vector is None and budget == anchor) else [],
+            "effect": {"mean": off.mean - turn_cost, "var": off.standard_error ** 2},
+            "offset_v1": off.mean, "turn_cost": turn_cost}
+
+
+def replayed_baselines(bench: Workbench) -> list[str]:
+    """The baselines replayed directly.  Outside Tab. IV the strongest baseline
+    is the most accurate replayed one (Sec. VII-A), so on BIRD the derived
+    LLM-agent rows are left out; on Spider 2.0-Lite they are replays."""
+    if bench.workload.budget_groups == "db":
+        return [m for m in default_methods(bench) if m not in DERIVED_AGENTS]
+    return default_methods(bench)
+
+
+def _result(bench: Workbench, name: str, budget: str | None, runs: int | None,
+            vector=None) -> dict:
+    """A method's result, the derived row for an LLM agent on BIRD."""
+    if bench.workload.budget_groups == "db" and name in DERIVED_AGENTS:
+        return derived_agent_at(bench, name, budget, vector, runs)
+    return bench.run_method(name, budget, runs, vector=vector)
+
+
 def budget_sweep(bench: Workbench, methods: list[str] | None = None,
-                 scales: tuple[float, ...] = (0.5, 0.75, 1.0, 1.5, 2.0, 3.0),
-                 base: str = "V1", runs: int = 1) -> dict:
-    """Accuracy against the money budget, the other dimensions left slack."""
+                 money: tuple[float, ...] = SWEEP_MONEY, runs: int = 1) -> dict:
+    """Fig. 3(a): accuracy against the money budget per question, with tokens
+    and service time unbounded."""
     methods = methods or ["best_fixed_mixture", "cascade_routing", "uab_style",
-                          "llm_agent"]
-    out: dict = {"base": base, "scales": list(scales), "curves": {}}
+                          "omnirouter_style", "vinelm_style", "llm_agent"]
+    out: dict = {"money": list(money), "curves": {}}
     for name in [PLANNER] + methods:
         curve = []
-        for s in scales:
-            res = bench.run_method(name, base, runs, budget_scale=s)
-            acc, _ = accuracy(res["runs"])
-            curve.append(acc)
+        for usd in money:
+            vector = np.array([usd, GRID_SLACK["tok"], GRID_SLACK["sec"]])
+            curve.append(_acc(_result(bench, name, None, runs, vector))[0])
         out["curves"][name] = curve
     return out
 
@@ -94,8 +203,9 @@ def budget_sweep(bench: Workbench, methods: list[str] | None = None,
 def budget_grid(bench: Workbench, pairs: tuple[tuple[str, str], ...] =
                 (("usd", "sec"), ("usd", "tok")), runs: int = 3,
                 methods: list[str] | None = None) -> dict:
-    """The lead when two budget dimensions vary and the third is slack."""
-    methods = methods or default_methods(bench)
+    """Fig. 4: the lead over the cell's strongest replayed baseline when two
+    budget dimensions vary and the third is slack."""
+    methods = methods or replayed_baselines(bench)
     unit_of = bench.unit_of()
     out: dict = {"axes": {k: list(v) for k, v in GRID_AXES.items()}, "pairs": {}}
     for x, y in pairs:
@@ -105,15 +215,16 @@ def budget_grid(bench: Workbench, pairs: tuple[tuple[str, str], ...] =
                 vector = np.array([GRID_SLACK[k] for k in DIMS], dtype=float)
                 vector[DIMS.index(x)] = vx
                 vector[DIMS.index(y)] = vy
-                ours = bench.run_method(PLANNER, DIMS[0], runs, vector=vector)
-                best_name, best_runs, best_acc = None, None, -1.0
+                # the modelled agent effects are interpolated by log budget
+                ours = bench.run_method(PLANNER, None, runs, vector=vector)
+                best_name, best_res, best_acc = None, None, -1.0
                 for name in methods:
-                    res = bench.run_method(name, DIMS[0], runs, vector=vector)
-                    acc, _ = accuracy(res["runs"])
+                    res = bench.run_method(name, None, runs, vector=vector)
+                    acc, _ = _acc(res)
                     if acc > best_acc:
-                        best_name, best_runs, best_acc = name, res["runs"], acc
-                acc, _ = accuracy(ours["runs"])
-                ld = lead(ours["runs"], best_runs, unit_of)
+                        best_name, best_res, best_acc = name, res, acc
+                acc, _ = _acc(ours)
+                ld = _lead(ours, best_res, unit_of)
                 cells.append({x: vx, y: vy, "accuracy": acc,
                               "strongest_baseline": best_name,
                               "baseline_accuracy": best_acc,
@@ -154,24 +265,35 @@ def pooled_budget(bench: Workbench, budgets: list[str] | None = None,
             res = planner.run(metas, budget, meter)
             ours_runs.append(dict(res.correct))
             ours_details.append(res.as_dict())
+        ours = {"runs": ours_runs, "effect": bench.effect(bench.cfg, b).as_dict()}
         rows: dict[str, dict] = {}
         for name in [m for m in methods if m in BASELINES]:
             per_run = []
             for r in range(runs):
+                # one meter for the batch; each database plans with the batch's
+                # per-question vector, and paces for every later question
                 meter = Meter(budget)
                 correct: dict[str, bool] = {}
-                for sub in bench.groups():
+                subs = bench.groups()
+                later = sum(g.size for g in subs)
+                for sub in subs:
+                    later -= sub.size
                     method = bench.method(name, sub)
                     model = getattr(method, "model", None)
                     if model is not None:
                         model.reset_online()
+                    method.batch_later = later
                     metas = bench.order_metas(sub.metas, r)
-                    correct.update(method.run(metas, meter.remaining, meter).correct)
+                    try:
+                        correct.update(method.run(metas, budget_for_group(b, sub.size),
+                                                  meter).correct)
+                    finally:
+                        method.batch_later = 0
                 per_run.append(correct)
             acc, spread = accuracy(per_run)
             rows[name] = {"accuracy": acc, "spread": spread,
-                          "lead_over": lead(ours_runs, per_run, unit_of).as_dict()}
-        acc, spread = accuracy(ours_runs)
+                          "lead_over": _lead(ours, {"runs": per_run}, unit_of).as_dict()}
+        acc, spread = _acc(ours)
         best = max(rows, key=lambda n: rows[n]["accuracy"]) if rows else None
         out["budgets"][b] = {
             "planner": {"accuracy": acc, "spread": spread,
@@ -185,25 +307,26 @@ def pooled_budget(bench: Workbench, budgets: list[str] | None = None,
 def arrival_orders(bench: Workbench, budgets: list[str] | None = None,
                    orders: tuple[str, ...] = ("random", "easy_first", "hard_first"),
                    methods: list[str] | None = None, runs: int | None = None) -> dict:
-    """The lead when the questions arrive sorted by difficulty."""
+    """Fig. 12(a): the lead over the strongest replayed baseline when the
+    questions arrive sorted by difficulty."""
     budgets = budgets or list(bench.workload.budgets)
-    methods = methods or default_methods(bench)
+    methods = methods or replayed_baselines(bench)
     unit_of = bench.unit_of()
     out: dict = {"budgets": {}}
     for b in budgets:
         rows: dict[str, dict] = {}
         for order in orders:
             ours = bench.run_method(PLANNER, b, runs, order=order)
-            best_runs, best_name, best_acc = None, None, -1.0
+            best_res, best_name, best_acc = None, None, -1.0
             for name in methods:
                 res = bench.run_method(name, b, runs, order=order)
-                acc, _ = accuracy(res["runs"])
+                acc, _ = _acc(res)
                 if acc > best_acc:
-                    best_name, best_runs, best_acc = name, res["runs"], acc
-            acc, _ = accuracy(ours["runs"])
+                    best_name, best_res, best_acc = name, res, acc
+            acc, _ = _acc(ours)
             rows[order] = {"accuracy": acc, "strongest_baseline": best_name,
                            "baseline_accuracy": best_acc,
-                           "lead": lead(ours["runs"], best_runs, unit_of).as_dict()}
+                           "lead": _lead(ours, best_res, unit_of).as_dict()}
         base = rows["random"]
         for order, row in rows.items():
             row["change_vs_random"] = row["lead"]["mean"] - base["lead"]["mean"]
@@ -242,7 +365,7 @@ def strata(bench: Workbench, budgets: list[str] | None = None,
             row[kind] = {}
             for label in sorted(set(labels.values())):
                 qids = [q for q, v in labels.items() if v == label]
-                ours_acc = _accuracy_on(ours["runs"], qids)
+                ours_acc = _accuracy_on(ours["runs"], qids) + _eff(ours).mean
                 best = max((_accuracy_on(r, qids) for r in base.values()),
                            default=0.0)
                 row[kind][label] = {"accuracy": ours_acc, "baseline": best,
@@ -256,8 +379,7 @@ def per_database(bench: Workbench, budgets: list[str] | None = None,
                  methods: list[str] | None = None, runs: int | None = None) -> dict:
     """The lead over each budget group's own strongest replayed baseline."""
     budgets = budgets or list(bench.workload.budgets)
-    methods = methods or [m for m in default_methods(bench)
-                          if not m.startswith("llm_agent")]
+    methods = methods or replayed_baselines(bench)
     out: dict = {"budgets": {}}
     for b in budgets:
         ours = bench.run_method(PLANNER, b, runs)
@@ -265,7 +387,7 @@ def per_database(bench: Workbench, budgets: list[str] | None = None,
         rows: dict[str, dict] = {}
         for group in bench.groups():
             qids = [m.qid for m in group.metas]
-            ours_acc = _accuracy_on(ours["runs"], qids)
+            ours_acc = _accuracy_on(ours["runs"], qids) + _eff(ours).mean
             best_name, best_acc = None, -1.0
             for name, r in base.items():
                 acc = _accuracy_on(r, qids)
@@ -283,7 +405,7 @@ def per_database(bench: Workbench, budgets: list[str] | None = None,
 def _accuracy_on(runs: list[dict[str, bool]], qids: list[str]) -> float:
     if not qids:
         return 0.0
-    means = [100.0 * np.mean([1.0 if r.get(q) else 0.0 for q in qids])
+    means = [100.0 * np.mean([float(r.get(q) or 0.0) for q in qids])
              for r in runs if r]
     return float(np.mean(means)) if means else 0.0
 
@@ -292,8 +414,11 @@ def _accuracy_on(runs: list[dict[str, bool]], qids: list[str]) -> float:
 # ablations
 # --------------------------------------------------------------------------- #
 def ablation_arms(cfg: PlannerConfig) -> dict[str, object]:
-    """Each arm is either a configuration of the planner or another method."""
+    """The arms of Fig. 9.  Each is either a configuration of the planner or
+    another method; the replay's defaults (rho = 0, online updates off,
+    modelled turns) are what each arm departs from."""
     return {
+        # world model
         "profiled_averages_no_world_model": ProfiledPerRequest,
         "full_data_heads_no_stacks": cfg.with_(use_stacking=False),
         "flat_world_model_no_rollouts": cfg.with_(use_rollouts=False),
@@ -301,35 +426,38 @@ def ablation_arms(cfg: PlannerConfig) -> dict[str, object]:
         "no_differential_features": cfg.with_(use_differential_features=False),
         "scored_before_first_stage": cfg.with_(score_from_empty=True),
         "log_scale_cost_heads": cfg.with_(log_scale_costs=True),
-        "edits_only_no_agent": cfg.with_(use_agent=False),
+        # planning
+        "core_only_no_agent": cfg.with_(use_agent=False),
         "whole_workflows_before_running": cfg.with_(plan_whole_workflows=True,
                                                     use_agent=False),
         "money_only_prices": cfg.with_(priced_dims=("usd",)),
         "greedy_ranking_no_allocation": cfg.with_(use_allocation_lp=False),
-        "opening_plan_no_resolves": cfg.with_(periodic_resolves=False),
+        "with_a_cost_reserve": cfg.with_(cost_reserve=True, reserve_z=1.0),
+        "opening_plan_no_periodic_resolves": cfg.with_(periodic_resolves=False),
+        # inputs
         "world_model_question_only": cfg.with_(use_execution_features=False),
         "world_model_execution_only": cfg.with_(use_question_features=False),
-        "no_online_cost_updates": cfg.with_(online_cost_updates=False),
-        "cost_reserve_one_sigma": cfg.with_(reserve_z=1.0),
     }
 
 
 def ablation(bench: Workbench, budgets: list[str] | None = None,
              arms: dict | None = None, runs: int | None = None) -> dict:
+    """Fig. 9: each arm against the full planner on the same orders and meter,
+    with its own paired 95% half-width."""
     budgets = budgets or list(bench.workload.budgets)
     arms = arms if arms is not None else ablation_arms(bench.cfg)
     out: dict = {"budgets": {}}
     for b in budgets:
         full = bench.run_method(PLANNER, b, runs)
-        acc, _ = accuracy(full["runs"])
+        acc, _ = _acc(full)
         rows: dict[str, dict] = {}
         for name, arm in arms.items():
             if isinstance(arm, PlannerConfig):
                 res = bench.run_method(PLANNER, b, runs, cfg=arm)
             else:
                 res = _run_other(bench, arm, b, runs)
-            contrast = paired_contrast(res["runs"], full["runs"])
-            a, _ = accuracy(res["runs"])
+            contrast = _contrast(res, full)
+            a, _ = _acc(res)
             rows[name] = {"accuracy": a, "change": contrast.mean,
                           "half_width": contrast.half_width,
                           "excludes_zero": contrast.excludes_zero}
@@ -338,14 +466,14 @@ def ablation(bench: Workbench, budgets: list[str] | None = None,
 
 
 def _run_other(bench: Workbench, cls, budget: str, runs: int | None) -> dict:
+    """An arm that is another method, on the planner's question orders."""
     runs = runs or bench.workload.runs
     per_run = []
     details = []
     for r in range(runs):
         correct: dict[str, bool] = {}
         for group in bench.groups():
-            metas = list(group.metas)
-            random.Random((r + 1) * 7919).shuffle(metas)
+            metas = bench.order_metas(group.metas, r)
             method = cls(name=cls.__name__, cfg=bench.cfg, library=bench.library)
             method.prepare(bench.corpus, bench.train_dbs(group))
             b = budget_for_group(budget, group.size)
@@ -373,7 +501,7 @@ def sensitivity(bench: Workbench, budget: str = "V4", runs: int | None = None
         rows = []
         for v in values:
             res = bench.run_method(PLANNER, budget, runs, cfg=cfg.with_(**{key: v}))
-            acc, _ = accuracy(res["runs"])
+            acc, _ = _acc(res)
             rows.append({"value": v, "accuracy": acc,
                          "turns": _mean_key(res["details"], "turns"),
                          "planning_share": _mean_planning(res["details"])})
@@ -419,7 +547,8 @@ def world_model_quality(bench: Workbench, openers: tuple[str, ...] = ("S", "M")
                     continue
                 s_held = sp
                 res = model.predict(meta, state, cont.stage).resolve(s_held)
-                _, ok2, _, outs = bench.corpus.run(meta, state, cont, held=ok)
+                _, ok2, _, outs = bench.corpus.run(meta, state, cont, held=ok,
+                                                   select=selector(model, meta, s_held))
                 cont_p.append(model.rollout(meta, state, cont, s_held).p)
                 cont_y.append(int(ok2))
                 if outs:
@@ -443,45 +572,67 @@ def world_model_quality(bench: Workbench, openers: tuple[str, ...] = ("S", "M")
     return out
 
 
-def online_learning(bench: Workbench, days: int = 5, day_n: int = 300,
-                    budget: str = "V4", seed: int = 0,
-                    label_share: float = 0.30) -> dict:
-    """Daily batches drawn from databases the world model has not seen.
+def online_learning(bench: Workbench, days: int = 5, day_n: int = 1500,
+                    budget: str = "V4", seed: int = 0, label_share: float = 0.30,
+                    day_corpus=None) -> dict:
+    """Fig. 11: daily batches from databases the world model has never seen.
 
-    Four arms: a never-updated model, the online cost corrections of the
-    paper's ratio estimator, those plus within-batch recalibration of the
-    correctness predictions, which needs no reference labels, and those plus
-    reference labels arriving late for a share of the previous days' answers.
+    The world model is fitted on the workload's databases, and each day's batch
+    is drawn from other databases: from ``day_corpus`` (the BIRD training
+    databases, 1,500 questions a day), or, without one, from databases held out
+    of the fit.  Four arms, each keeping its own state across days:
+
+    * ``frozen``: a never-updated model;
+    * ``updated``: the online cost updates of Eq. 5;
+    * ``recalibrated``: those plus within-batch recalibration of the success
+      heads from observed execution rates, which needs no reference labels;
+    * ``labelled``: those plus delayed reference labels for ``label_share`` of
+      the previous days' answers, which join the trace corpus before the heads
+      are refit between batches.
     """
+    from ..worldmodel.model import StageWorldModel
+
     rng = random.Random(seed)
-    groups = bench.groups()
-    out: dict = {"days": [], "budget": budget, "label_share": label_share}
-    arms = {"frozen": bench.cfg.with_(online_cost_updates=False),
-            "updated": bench.cfg.with_(online_cost_updates=True),
-            "recalibrated": bench.cfg.with_(online_cost_updates=True),
-            "labelled": bench.cfg.with_(online_cost_updates=True)}
-    planners = {k: bench.planner(groups[0], c) for k, c in arms.items()}
-    assert planners["updated"].model is not planners["frozen"].model
-    pool = [m for g in groups[1:] for m in g.metas] or list(groups[0].metas)
-    seen: dict[str, list[tuple]] = {k: [] for k in arms}
+    if day_corpus is not None:
+        fit_group = BudgetGroup("online-fit-all", [], [])     # fit on every database
+        pool_corpus = day_corpus
+        pool = list(day_corpus.questions)
+    else:
+        dbs = bench.corpus.dbs
+        held = dbs[: max(1, len(dbs) // 2)]
+        fit_group = BudgetGroup("online-fit-" + "-".join(held), held, [])  # fit without them
+        pool_corpus = bench.corpus
+        pool = [m for d in held for m in bench.corpus.questions_of(d)]
+    online = dict(online_cost_updates=True)
+    arms = {"frozen": bench.cfg.with_(online_cost_updates=False, recalibrate_success=False),
+            "updated": bench.cfg.with_(**online),
+            "recalibrated": bench.cfg.with_(**online, recalibrate_success=True),
+            "labelled": bench.cfg.with_(**online, recalibrate_success=True)}
+    planners = {}
+    for k, c in arms.items():
+        p = bench.planner(fit_group, c)
+        p.corpus = pool_corpus
+        planners[k] = p
+    labelled_rows: list = []
+    train_dbs = [d for d in bench.corpus.dbs if d not in fit_group.dbs]
+    out: dict = {"days": [], "budget": budget, "label_share": label_share,
+                 "day_questions": min(day_n, len(pool)),
+                 "unseen_databases": len({m.db for m in pool})}
     for day in range(days):
         batch = rng.sample(pool, min(day_n, len(pool)))
         row: dict = {"day": day + 1}
         for k, planner in planners.items():
+            row[k] = {"cost_error_usd": _median_cost_error(planner, batch)}
             b = budget_for_group(budget, len(batch))
             res = planner.run(batch, b, Meter(b, planning_cap=bench.cfg.planning_cap))
-            row[k] = {"accuracy": res.accuracy * 100.0,
-                      "cancelled": res.cancelled,
-                      "cost_error_usd": _median_kappa(planner)}
-            states = [(r.meta, r.state) for r in planner.records.values()]
-            if k == "recalibrated":
-                _recalibrate(planner, states)
-            elif k == "labelled":
-                labelled = [(m, st) for m, st in states
+            row[k].update({"accuracy": res.accuracy * 100.0,
+                           "cancelled_per_1k": 1000.0 * res.cancelled / max(1, len(batch))})
+            if k == "labelled":
+                labelled = [r for r in planner.records.values()
                             if rng.random() < label_share]
-                seen[k].extend((m, st, planner.records[m.qid].held_correct)
-                               for m, st in labelled)
-                _calibrate_to_labels(planner, seen[k])
+                labelled_rows += _rows_from_history(pool_corpus, labelled)
+                _refit_with(planner, bench.corpus, train_dbs, labelled_rows,
+                            StageWorldModel)
         for k in ("updated", "recalibrated", "labelled"):
             row[f"gain_{k}"] = row[k]["accuracy"] - row["frozen"]["accuracy"]
         row["gain"] = row["gain_updated"]
@@ -489,42 +640,81 @@ def online_learning(bench: Workbench, days: int = 5, day_n: int = 300,
     return out
 
 
-def _recalibrate(planner, states: list[tuple]) -> None:
-    by_db: dict[str, list[tuple]] = {}
-    for meta, state in states:
-        by_db.setdefault(meta.db, []).append((meta, state))
-    for db, items in by_db.items():
-        planner.model.recalibrate(db, items)
+def _rows_from_history(corpus, records) -> list:
+    """Training rows for the stages a labelled question ran: once its reference
+    is known, every answer it produced can be scored."""
+    from ..grammar import ANSWER_PRODUCING
+    from ..trace.corpus import TrainingRow
+    rows = []
+    for rec in records:
+        state, held = State(), None
+        for i, (stage, _) in enumerate(rec.state.history):
+            out = corpus.outcome(rec.meta, state, stage)
+            if out is None:
+                break
+            out.held_before = held
+            rows.append(TrainingRow(rec.meta, state, stage, out, held))
+            keep = rec.state.kept(i)          # the branch Select took
+            if stage.kind in ANSWER_PRODUCING and (keep or held is None):
+                held = out.answer_correct
+            state = state.append(stage, out.obs, keep=keep, values=out)
+    return rows
 
 
-def _calibrate_to_labels(planner, rows: list[tuple]) -> None:
-    by_db: dict[str, list[tuple]] = {}
-    for meta, state, ok in rows:
-        by_db.setdefault(meta.db, []).append((meta, state, ok))
-    for db, items in by_db.items():
-        target = float(np.mean([1.0 if ok else 0.0 for _, _, ok in items]))
-        planner.model.calibrate_to(db, [(m, st) for m, st, _ in items], target)
+def _refit_with(planner, corpus, train_dbs: list[str], extra: list, model_cls) -> None:
+    """Refit the heads on the training corpus plus the labelled rows, keeping
+    the planner's online corrections."""
+    old = planner.model
+    model = model_cls(old.cfg)
+    model.train_dbs = list(train_dbs)
+    model._fit_rows(corpus.training_rows(train_dbs) + list(extra))
+    model._kappa, model._cost_obs = old._kappa, old._cost_obs
+    model._logit_shift = old._logit_shift
+    planner.model = model
+    planner.values.model = model
 
 
-def _median_kappa(planner) -> float:
-    vals = [abs(v - 1.0) for (_, _, k), v in planner.model._kappa.items() if k == 0]
-    return float(np.median(vals)) if vals else 0.0
+def _median_cost_error(planner, metas) -> float:
+    """The median relative error of the money predicted for each question's
+    first stage at the start of a day, against its recorded cost."""
+    from ..grammar import gen
+    errs = []
+    stage = gen("S")
+    for m in metas[:300]:
+        out = planner.corpus.outcome(m, State(), stage)
+        if out is None or out.cost[0] <= 0:
+            continue
+        pred = planner.model.predict(m, State(), stage).mu[0]
+        errs.append(abs(pred - out.cost[0]) / out.cost[0])
+    return float(np.median(errs)) if errs else 0.0
 
 
 def calibration(bench: Workbench, budget: str = "V4", bins: int = 10,
                 runs: int | None = None) -> dict:
-    """Reliability of the continuations the planner selects: its predicted
-    correctness against what the replay realised."""
+    """Fig. 10(a): reliability of the continuations the planner selects, the
+    stacked value p-tilde it allocated each by against the correctness the
+    replay realised for it."""
+    from ..planner import BatchPlanner, PlanningAgent
     runs = runs or 1
     pred, real = [], []
+    groups = bench.groups()
     for r in range(runs):
-        for group in bench.groups():
-            metas = bench.order_metas(group.metas, r)
-            b = budget_for_group(budget, group.size)
-            planner = bench.planner(group)
-            planner.run(metas, b, Meter(b, planning_cap=bench.cfg.planning_cap))
+        planners = [bench.planner(g) for g in groups]
+        items = []
+        for g in groups:
+            b = budget_for_group(budget, g.size)
+            items.append((bench.order_metas(g.metas, r), b,
+                          Meter(b, planning_cap=bench.cfg.planning_cap)))
+        agent = None
+        if bench.cfg.use_agent:
+            agent = (bench.agent_factory(True) if bench.agent_factory is not None
+                     else PlanningAgent())
+        BatchPlanner(planners, bench.cfg, agent).run(items)
+        for planner in planners:
             for rec in planner.records.values():
-                pred.append(float(rec.s_held))
+                if rec.selected_value is None:
+                    continue            # no continuation selected for it
+                pred.append(float(rec.selected_value))
                 real.append(1.0 if rec.held_correct else 0.0)
     p = np.asarray(pred)
     y = np.asarray(real)
@@ -587,8 +777,9 @@ def unprofiled_trace(bench: Workbench, budget: str = "V4", opener: str = "S",
                 vals = values.values([m for m, _, _ in items],
                                      [st for _, st, _ in items],
                                      [cont] * len(items), rolls, helds)
-                for (meta, state, ok), v in zip(items, vals):
-                    _, ok2, _, _ = bench.corpus.run(meta, state, cont, held=ok)
+                for (meta, state, ok), v, v_held in zip(items, vals, helds):
+                    _, ok2, _, _ = bench.corpus.run(meta, state, cont, held=ok,
+                                                    select=selector(model, meta, v_held))
                     p.append(float(v))
                     y.append(int(ok2))
             auc.append(_auc(y, p))
@@ -629,6 +820,7 @@ def overhead(bench: Workbench, budgets: list[str] | None = None,
     for b in budgets:
         res = bench.run_method(PLANNER, b, runs)
         out["budgets"][b] = {
+            "accuracy": _acc(res)[0],
             "planning_share": _mean_planning(res["details"]),
             "turns": _mean_key(res["details"], "turns"),
             "sessions": _mean_key(res["details"], "sessions"),
@@ -638,7 +830,7 @@ def overhead(bench: Workbench, budgets: list[str] | None = None,
         cfg = bench.cfg.with_(use_agent=requested > 0,
                               max_sessions=max(1, requested))
         res = bench.run_method(PLANNER, budgets[0], runs, cfg=cfg)
-        acc, _ = accuracy(res["runs"])
+        acc, _ = _acc(res)
         out["sessions"].append({
             "requested": requested, "accuracy": acc,
             "turns": _mean_key(res["details"], "turns"),
@@ -667,23 +859,44 @@ def overhead(bench: Workbench, budgets: list[str] | None = None,
     return out
 
 
+def _continuations(grammar, state: State, w_max: int) -> list:
+    """Up to ``w_max`` continuations a question may take from its state: each
+    stage the grammar allows next, and a verification with the escalation it
+    would trigger."""
+    from ..grammar import branch, shape
+    out: dict[str, object] = {}
+    for a in grammar.actions(state):
+        out.setdefault(shape(branch(a, {o: None for o in a.observations()})),
+                       branch(a, {o: None for o in a.observations()}))
+        if a.kind == "verify":
+            for tier in ("M", "L"):
+                chain = parse_chain(f"ver:{a.tier},esc:{tier}")
+                if grammar.is_wellformed(chain, state):
+                    out.setdefault(shape(chain), chain)
+    return list(out.values())[:max(0, w_max)]
+
+
 def scaling(bench: Workbench, sizes: tuple[int, ...] = (1530, 5000, 15000,
                                                        50000, 150000),
             budget: str = "V1", group_size: int = 139,
-            limit_s: float = 60.0) -> dict:
-    """The local CPU time planning needs as the batch grows.
+            limit_s: float = 60.0, whole_up_to: int = 50000) -> dict:
+    """Fig. 13(a): the local CPU time planning needs as the batch grows.
 
-    A batch resampled from the workload is scored once, its digest built, and
-    the allocation solved per budget group of ``group_size`` questions and once
-    for the whole batch.  The whole-batch program is abandoned at ``limit_s``.
-    """
+    A batch resampled from the workload is scored once with up to W_max
+    continuations per question (``cfg.max_candidates``) plus stop, and the
+    allocation is solved per budget group of ``group_size`` questions and once
+    for the whole batch, a program of at most |I| W_max variables and |I| + d
+    constraints (Sec. VI).  The whole-batch program is abandoned at
+    ``limit_s``."""
     groups = bench.groups()
     pool = [m for g in groups for m in g.metas]
     held = groups[0]
     values = bench.values(held)
     model = values.model
-    cont = parse_chain("esc:L")
-    out: dict = {"limit_s": limit_s, "group_size": group_size, "rows": []}
+    grammar = bench.corpus.grammar
+    w_max = bench.cfg.max_candidates
+    out: dict = {"limit_s": limit_s, "group_size": group_size, "w_max": w_max,
+                 "rows": []}
     for n in sizes:
         rng = random.Random(n)
         batch = [pool[rng.randrange(len(pool))] for _ in range(n)]
@@ -694,46 +907,58 @@ def scaling(bench: Workbench, sizes: tuple[int, ...] = (1530, 5000, 15000,
             states.append((meta, state, ok))
         reps = -(-n // len(states))
         items = (states * reps)[:n]
+        conts = [_continuations(grammar, st, w_max) for _, st, _ in items]
 
         t0 = time.perf_counter()
         helds = model.s_of_many([(m, st) for m, st, _ in items])
-        rolls = model.rollout_many([(m, st, cont) for m, st, _ in items], helds)
-        values.values([m for m, _, _ in items], [st for _, st, _ in items],
-                      [cont] * n, rolls, helds)
+        flat = [(m, st, c, h) for (m, st, _), cs, h in zip(items, conts, helds)
+                for c in cs]
+        rolls = model.rollout_many([(m, st, c) for m, st, c, _ in flat],
+                                   [h for *_, h in flat])
+        vals = values.values([f[0] for f in flat], [f[1] for f in flat],
+                             [f[2] for f in flat], rolls, [f[3] for f in flat])
+        stop_vals = values.values([m for m, _, _ in items], [st for _, st, _ in items],
+                                  [STOP] * n, [None] * n, helds)
         score_s = time.perf_counter() - t0
 
-        cands = []
-        for i, ((meta, state, _), roll, h) in enumerate(zip(items, rolls, helds)):
+        per_q: list[list[Candidate]] = []
+        k = 0
+        for i, ((meta, _, _), cs) in enumerate(zip(items, conts)):
             qid = f"{meta.qid}#{i}"
-            cands.append(Candidate(qid, "esc:L", roll.p, roll.cost, roll.var,
-                                   roll.worst_case))
-            cands.append(Candidate(qid, "stop", h, zeros(), zeros(), zeros(),
-                                   is_stop=True))
+            row = [Candidate(qid, "stop", float(stop_vals[i]), zeros(), zeros(),
+                             zeros(), is_stop=True)]
+            for c in cs:
+                roll = rolls[k]
+                row.append(Candidate(qid, f"c{k}", float(vals[k]), roll.cost, roll.var,
+                                     roll.worst_case))
+                k += 1
+            per_q.append(row)
         rhs = budget_for_group(budget, n)
 
         t0 = time.perf_counter()
         n_groups = 0
-        for start in range(0, n, group_size * 2):
-            chunk = cands[start:start + group_size * 2]
+        for start in range(0, n, group_size):
+            chunk = [c for row in per_q[start:start + group_size] for c in row]
             if not chunk:
                 break
-            solve(chunk, rhs * (len(chunk) / 2.0 / n))
+            solve(chunk, rhs * (min(group_size, n - start) / n))
             n_groups += 1
         group_s = time.perf_counter() - t0
 
         whole_s, whole_done = None, None
-        if n <= 50000:
+        if n <= whole_up_to:
+            cands = [c for row in per_q for c in row]
             t0 = time.perf_counter()
             try:
-                solve(cands, rhs, time_limit=limit_s)
+                res = solve(cands, rhs, time_limit=limit_s)
                 whole_s = time.perf_counter() - t0
-                whole_done = whole_s <= limit_s
+                whole_done = res.status == "optimal" and whole_s <= limit_s
             except Exception:
                 whole_s = time.perf_counter() - t0
                 whole_done = False
         out["rows"].append({
-            "n": n, "score_s": score_s, "groups": n_groups,
-            "group_total_s": group_s,
+            "n": n, "candidates": len(flat) + n, "score_s": score_s,
+            "groups": n_groups, "group_total_s": group_s,
             "group_ms": 1000.0 * group_s / max(1, n_groups),
             "whole_s": whole_s, "whole_done": whole_done})
     return out
@@ -796,20 +1021,31 @@ def _question_bin(meta) -> str:
 
 
 def predicted_versus_replayed(bench: Workbench, budgets: list[str] | None = None,
-                              runs: int = 1) -> dict:
-    """The opening plan's predicted value against what the run realises, with
-    and without the held-out stacks."""
+                              runs: int = 1, base: str = "best_fixed_mixture") -> dict:
+    """Tab. V(b): gains over the best fixed mixture.  ``predicted`` is the
+    opening plan's value, ``replayed`` the run that starts from it with the
+    agent's budget charged but its turns not taken, ``full`` that run with the
+    modelled effects (BudgetSQL in Tab. IV), and ``se`` the paired standard
+    error of the replayed gain.  The same with full-data heads, no held-out
+    stacks, gives the overestimate the stacks remove."""
     budgets = budgets or list(bench.workload.budgets)
-    out: dict = {"budgets": {}}
+    unit_of = bench.unit_of()
+    out: dict = {"budgets": {}, "base": base}
     for b in budgets:
+        mix = bench.run_method(base, b, runs)
+        mix_acc, _ = _acc(mix)
         row = {}
-        for label, cfg in (("stacked", bench.cfg.with_(use_agent=False)),
-                           ("full_data_heads", bench.cfg.with_(use_agent=False,
-                                                               use_stacking=False))):
-            res = bench.run_method(PLANNER, b, runs, cfg=cfg)
-            acc, _ = accuracy(res["runs"])
-            pred = 100.0 * _mean_key(res["details"], "predicted_accuracy")
-            row[label] = {"predicted": pred, "replayed": acc, "gap": pred - acc}
+        for label, cfg in (("stacked", bench.cfg),
+                           ("full_data_heads", bench.cfg.with_(use_stacking=False))):
+            replay = bench.run_method(PLANNER, b, runs, cfg=cfg, with_effects=False)
+            full = bench.run_method(PLANNER, b, runs, cfg=cfg)
+            pred = 100.0 * _mean_key(replay["details"], "predicted_accuracy")
+            rep_acc, _ = _acc(replay)
+            full_acc, _ = _acc(full)
+            row[label] = {"predicted": pred - mix_acc, "replayed": rep_acc - mix_acc,
+                          "full": full_acc - mix_acc,
+                          "overestimate": pred - rep_acc,
+                          "se": _lead(replay, mix, unit_of).standard_error}
         out["budgets"][b] = row
     return out
 
@@ -817,53 +1053,132 @@ def predicted_versus_replayed(bench: Workbench, budgets: list[str] | None = None
 # --------------------------------------------------------------------------- #
 # deployment scenarios
 # --------------------------------------------------------------------------- #
-def scenarios(bench: Workbench, budget: str = "V4", runs: int = 1) -> dict:
-    """The planner against the strongest baseline when the agent, the
-    executors or the digest changes.
+@dataclass
+class Scenario:
+    """One configuration of Fig. 13(b): who plans and who answers.
 
-    An open agent reads either the text digest or a latent digest of a few
-    dozen soft tokens, which costs a fraction of the prompt.
-    """
-    from ..config import PRICES, Price
-    unit_of = bench.unit_of()
-    OPEN_EXECUTORS = {"S": Price(0.05, 0.08), "M": Price(0.12, 0.20),
-                      "L": Price(0.30, 0.50)}
-    MINI_AGENT = {"agent": Price(0.40, 1.60)}
-    OPEN_AGENT = {"agent": Price(0.20, 0.30)}
-    presets = {
-        "api_agent_api_executors": ({}, False),
-        "mini_agent_api_executors": (MINI_AGENT, False),
-        "api_agent_open_executors": (OPEN_EXECUTORS, False),
-        "open_agent_api_executors_digest": (OPEN_AGENT, False),
-        "open_agent_api_executors_latent": (OPEN_AGENT, True),
-        "open_agent_open_executors_digest": ({**OPEN_EXECUTORS, **OPEN_AGENT}, False),
-        "open_agent_open_executors_latent": ({**OPEN_EXECUTORS, **OPEN_AGENT}, True),
-    }
+    ``bench`` is the workbench of the executors' trace; for open-weight
+    executors served locally its money is amortised GPU time, and
+    ``executor_prices`` are the per-token prices the meter reserves at.
+    ``time_scale`` scales the vector's service time by local-to-API latency.
+    ``effects`` are this agent's modelled effects, ``agent_price`` its price.
+    A latent digest is charged as ``latent_tokens`` prompt tokens; the replay
+    models its turns, so only what a turn costs changes."""
+
+    name: str
+    agent_price: object = None
+    bench: object = None
+    executor_prices: dict | None = None
+    time_scale: float = 1.0
+    effects: object = None
+    latent: bool = False
+
+
+def default_scenarios(bench: Workbench, open_bench: Workbench | None = None,
+                      open_prices: dict | None = None, open_time_scale: float = 1.0,
+                      open_agent_price=None, effects_by_agent: dict | None = None
+                      ) -> list[Scenario]:
+    """The seven configurations of Fig. 13(b).  Those with open-weight
+    executors need their trace (``open_bench``) and prices; those with the
+    open-weight agent need its amortised price.  A configuration whose inputs
+    are missing is reported as skipped rather than guessed."""
+    from ..config import Price
+    eff = effects_by_agent or {}
+    gpt5, mini, qwen = None, Price(0.40, 1.60), open_agent_price
+    out = [Scenario("gpt5/api/digest", gpt5, effects=eff.get("gpt5")),
+           Scenario("4.1-mini/api/digest", mini, effects=eff.get("4.1-mini"))]
+    open_kw = dict(bench=open_bench, executor_prices=open_prices,
+                   time_scale=open_time_scale)
+    out.append(Scenario("gpt5/open/digest", gpt5, effects=eff.get("gpt5"), **open_kw))
+    for latent in (False, True):
+        tag = "latent" if latent else "digest"
+        out.append(Scenario(f"qwen/api/{tag}", qwen, effects=eff.get("qwen"),
+                            latent=latent))
+        out.append(Scenario(f"qwen/open/{tag}", qwen, effects=eff.get("qwen"),
+                            latent=latent, **open_kw))
+    return out
+
+
+def scenarios(bench: Workbench, budget: str = "V4", runs: int = 1,
+              presets: list[Scenario] | None = None) -> dict:
+    """Fig. 13(b): BudgetSQL against each configuration's strongest baseline
+    when the agent, the executors or the digest changes."""
+    from ..config import PRICES
+    presets = presets if presets is not None else default_scenarios(bench)
     out: dict = {"budget": budget, "configurations": {}}
     original = dict(PRICES)
-    try:
-        for name, (override, latent) in presets.items():
+    for sc in presets:
+        open_exec = "/open/" in sc.name
+        if (open_exec and sc.bench is None) or (sc.name.startswith("qwen")
+                                                and sc.agent_price is None):
+            out["configurations"][sc.name] = {
+                "skipped": "needs " + ("the open-weight executors' trace"
+                                       if open_exec and sc.bench is None
+                                       else "the open-weight agent's price")}
+            continue
+        sb = sc.bench or bench
+        saved = sb.effects
+        try:
             PRICES.update(original)
-            PRICES.update(override)
-            cfg = bench.cfg
-            if latent:
-                cfg = cfg.with_(digest_tokens=cfg.latent_tokens)
-            ours = bench.run_method(PLANNER, budget, runs, cfg=cfg)
-            best_name, best_runs, best_acc = None, None, -1.0
-            for b in ("cascade_routing", "uab_style", "best_fixed_mixture"):
-                res = bench.run_method(b, budget, runs)
-                acc, _ = accuracy(res["runs"])
+            if sc.agent_price is not None:
+                PRICES["agent"] = sc.agent_price
+            if sc.executor_prices:
+                PRICES.update(sc.executor_prices)
+            if sc.effects is not None:
+                sb.effects = sc.effects
+            cfg = sb.cfg.with_(digest_tokens=sb.cfg.latent_tokens) if sc.latent else sb.cfg
+            vector = BUDGETS[budget].copy()
+            vector[2] *= sc.time_scale
+            unit_of = sb.unit_of()
+            ours = sb.run_method(PLANNER, budget, runs, cfg=cfg, vector=vector)
+            best_name, best_res, best_acc = None, None, -1.0
+            for b in replayed_baselines(sb):
+                res = sb.run_method(b, budget, runs, vector=vector)
+                acc, _ = _acc(res)
                 if acc > best_acc:
-                    best_name, best_runs, best_acc = b, res["runs"], acc
-            acc, _ = accuracy(ours["runs"])
-            out["configurations"][name] = {
+                    best_name, best_res, best_acc = b, res, acc
+            acc, _ = _acc(ours)
+            out["configurations"][sc.name] = {
                 "accuracy": acc, "strongest_baseline": best_name,
                 "baseline_accuracy": best_acc,
                 "planning_share": _mean_planning(ours["details"]),
-                "lead": lead(ours["runs"], best_runs, unit_of).as_dict(),
+                "lead": _lead(ours, best_res, unit_of).as_dict(),
             }
-    finally:
-        PRICES.update(original)
+        finally:
+            sb.effects = saved
+            PRICES.clear()
+            PRICES.update(original)
+    return out
+
+
+def price_sensitivity(bench: Workbench, factors: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0),
+                      base: str = "V1", tier: str = "L", runs: int | None = None,
+                      methods: list[str] | None = None) -> dict:
+    """Fig. 12(b): accuracy as the large tier's price changes, read from the
+    money sweep.  A price change by k acts on a method like a change of its
+    money, in proportion to its share of money on that tier, so each method
+    runs at the effective money m / (1 + (k - 1) share), with its share
+    measured at ``base``."""
+    methods = methods or replayed_baselines(bench)
+    v = BUDGETS[base]
+    out: dict = {"base": base, "tier": tier, "factors": list(factors), "methods": {}}
+    for name in [PLANNER] + methods:
+        res = bench.run_method(name, base, runs)
+        spent = {}
+        for d in res["details"]:
+            for t, usd in (d.get("tier_money") or {}).items():
+                spent[t] = spent.get(t, 0.0) + float(usd)
+        total = sum(spent.values())
+        share = spent.get(tier, 0.0) / total if total > 0 else 0.0
+        curve = []
+        for k in factors:
+            vector = np.array([v[0] / (1.0 + (k - 1.0) * share), v[1], v[2]])
+            curve.append(_acc(bench.run_method(name, None, runs, vector=vector))[0])
+        out["methods"][name] = {"share": share, "accuracy": curve}
+    base_rows = {n: r for n, r in out["methods"].items() if n != PLANNER}
+    out["strongest_baseline"] = [
+        max(base_rows, key=lambda n: base_rows[n]["accuracy"][i]) if base_rows else None
+        for i in range(len(factors))]
     return out
 
 
@@ -905,4 +1220,15 @@ def _mean_binding(details: list[dict]) -> dict:
         vals = [d["binding_fraction"].get(k, 0.0) for d in details
                 if "binding_fraction" in d]
         out[k] = float(np.mean(vals)) if vals else 0.0
+    return out
+
+
+def _planning_spend(details: list[dict]) -> np.ndarray:
+    """What planning spent, summed over the runs' budget groups."""
+    out = np.zeros(len(DIMS))
+    for d in details:
+        share = d.get("planning_share") or {}
+        budget = d.get("budget") or {}
+        out += np.array([float(share.get(k, 0.0)) * float(budget.get(k, 0.0))
+                         for k in DIMS])
     return out

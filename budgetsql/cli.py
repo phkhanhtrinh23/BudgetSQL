@@ -24,8 +24,10 @@ PROFILES = {
 # building a workbench
 # --------------------------------------------------------------------------- #
 def make_corpus(args):
+    from .config import use_workload_prices
     from .trace import RecordedTrace, SimulatedTrace, TraceCorpus
     workload = WORKLOADS.get(args.workload, WORKLOADS["bird"])
+    use_workload_prices(workload)
     if args.trace:
         source = RecordedTrace(args.trace)
     else:
@@ -41,20 +43,37 @@ def make_config(args) -> PlannerConfig:
     cfg = PlannerConfig(limits=workload.limits, **PROFILES.get(args.profile, {}))
     if getattr(args, "no_agent", False):
         cfg = cfg.with_(use_agent=False)
-    if getattr(args, "runs", None):
-        pass
+    if getattr(args, "live_agent", False):
+        cfg = cfg.with_(agent_mode="live")
     return cfg
 
 
 def make_bench(args) -> Workbench:
+    from .eval.effects import ModelledEffects
     corpus = make_corpus(args)
     workload = WORKLOADS.get(args.workload, WORKLOADS["bird"])
     if getattr(args, "runs", None):
         workload = type(workload)(**{**workload.__dict__, "runs": args.runs})
     cache = Path(args.cache) if args.cache else None
     folds = 2 if args.profile == "smoke" else 4
+    effects = (ModelledEffects.load(args.effects) if getattr(args, "effects", None)
+               else ModelledEffects())
+    agent_factory = None
+    if getattr(args, "chat_agent", False):
+        from .planner.agent import chat_agent_from_env
+        agent_factory = chat_agent_from_env
     return Workbench(corpus, make_config(args), workload, cache,
-                     reference_library(), inner_folds=folds)
+                     reference_library(), inner_folds=folds, effects=effects,
+                     agent_factory=agent_factory)
+
+
+def make_day_corpus(args):
+    """The trace of the databases the online experiment draws its days from."""
+    if not getattr(args, "day_trace", None):
+        return None
+    from .trace import RecordedTrace, TraceCorpus
+    return TraceCorpus(RecordedTrace(args.day_trace), Grammar(),
+                       max_states=args.max_states, seed=args.seed)
 
 
 def write(args, kind: str, result) -> None:
@@ -71,8 +90,10 @@ def write(args, kind: str, result) -> None:
 # commands
 # --------------------------------------------------------------------------- #
 def cmd_simulate(args) -> None:
+    from .config import use_workload_prices
     from .trace import SimulatedTrace, materialise, write_jsonl
     workload = WORKLOADS.get(args.workload, WORKLOADS["bird"])
+    use_workload_prices(workload)
     src = SimulatedTrace(n_questions=args.questions or workload.n_questions,
                          n_dbs=args.dbs or workload.n_dbs, seed=args.seed,
                          name=args.workload)
@@ -135,13 +156,14 @@ def _exp():
     from .eval import experiments as x
     return {
         "main": ("main", lambda b, a: x.main_table(b, budgets=a.budgets, runs=a.runs)),
-        "sweep": ("sweep", lambda b, a: x.budget_sweep(b, runs=1)),
+        "sweep": ("sweep", lambda b, a: x.budget_sweep(b, runs=a.runs or 1)),
         "ablation": ("ablation", lambda b, a: x.ablation(b, budgets=a.budgets,
                                                          runs=a.runs)),
         "sensitivity": ("sensitivity", lambda b, a: x.sensitivity(
             b, budget=(a.budgets or ["V4"])[0], runs=a.runs)),
         "online": ("online", lambda b, a: x.online_learning(
-            b, days=a.days, day_n=a.day_questions)),
+            b, days=a.days, day_n=a.day_questions, day_corpus=make_day_corpus(a))),
+        "effects": ("effects", lambda b, a: _estimate_effects(b, a)),
         "overhead": ("overhead", lambda b, a: x.overhead(b, budgets=a.budgets,
                                                           runs=1)),
         "frontier": ("frontier", lambda b, a: x.trace_frontier(b)),
@@ -164,13 +186,25 @@ def _exp():
         "unprofiled": ("unprofiled", lambda b, a: x.unprofiled_trace(
             b, budget=(a.budgets or ["V4"])[0])),
         "scaling": ("scaling", lambda b, a: x.scaling(b)),
+        "prices": ("prices", lambda b, a: x.price_sensitivity(b, runs=a.runs)),
     }
 
 
 EXPERIMENT_NAMES = ("main", "sweep", "grid", "pooled", "ablation", "sensitivity",
                     "online", "overhead", "scaling", "frontier", "worldmodel",
                     "calibration", "unprofiled", "plans", "scenarios", "orders",
-                    "strata", "perdb")
+                    "strata", "perdb", "effects", "prices")
+
+
+def _estimate_effects(bench, args) -> dict:
+    """Measure the modelled effects of the agent's turns and, with
+    ``--effects-out``, save them for ``--effects``."""
+    from .eval.effects import estimate
+    eff = estimate(bench, budgets=args.budgets, runs=args.runs)
+    if getattr(args, "effects_out", None):
+        eff.dump(args.effects_out)
+    return {b: {c: e.as_dict() for c, e in comps.items()}
+            for b, comps in eff.by_vector.items()}
 
 
 def cmd_exp(args) -> None:
@@ -201,6 +235,13 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--workload", default="bird", choices=sorted(WORKLOADS))
         sp.add_argument("--profile", default="full", choices=sorted(PROFILES))
         sp.add_argument("--cache", default="runs/cache")
+        sp.add_argument("--effects", help="modelled agent effects (JSON) that "
+                        "BudgetSQL's replayed accuracy carries (Sec. VII-A)")
+        sp.add_argument("--live-agent", dest="live_agent", action="store_true",
+                        help="take the agent's turns instead of modelling them")
+        sp.add_argument("--chat-agent", dest="chat_agent", action="store_true",
+                        help="the language-model agent (BUDGETSQL_MODEL_AGENT) "
+                             "instead of the rule-based stand-ins")
         if out:
             sp.add_argument("--out")
 
@@ -240,7 +281,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--budgets", nargs="*", default=None)
     sp.add_argument("--runs", type=int, default=None)
     sp.add_argument("--days", type=int, default=5)
-    sp.add_argument("--day-questions", dest="day_questions", type=int, default=300)
+    sp.add_argument("--day-questions", dest="day_questions", type=int, default=1500)
+    sp.add_argument("--day-trace", dest="day_trace",
+                    help="trace of the unseen databases the online days are drawn "
+                         "from (BIRD train); without it, held-out databases")
+    sp.add_argument("--effects-out", dest="effects_out",
+                    help="where 'exp effects' saves the measured effects")
     sp.add_argument("--no-agent", action="store_true")
     sp.set_defaults(func=cmd_exp)
 

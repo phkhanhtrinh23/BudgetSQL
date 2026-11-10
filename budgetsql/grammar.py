@@ -76,34 +76,118 @@ class Stage:
 # --------------------------------------------------------------------------- #
 # states
 # --------------------------------------------------------------------------- #
+#: Marks, in a branch key, a replacing stage whose new answer Select rejected.
+REJECTED = "~rejected"
+
+
+@dataclass(frozen=True)
+class Observables:
+    """The numeric part of what the executed stages revealed about the held
+    answer: how many distinct results its samples gave, how long its producing
+    call's completion was, and how many earlier answers agree with it (with
+    ``n_earlier`` the answers produced besides it).  In an imagined rollout
+    they are imputed by their training mean given the stage and observation."""
+
+    n_distinct: float = 1.0
+    completion_tokens: float = 0.0
+    earlier_equal: float = 0.0
+
+    def after(self, stage: "Stage", kept: bool, values) -> "Observables":
+        """The observables once ``stage`` ran and returned ``values`` (any
+        object with ``n_distinct``, ``completion_tokens`` and
+        ``equal_to_held``), with Select's decision ``kept``."""
+        if values is None:
+            return self
+        nd = float(getattr(values, "n_distinct", 1.0))
+        comp = float(getattr(values, "completion_tokens", 0.0))
+        eq = float(getattr(values, "equal_to_held", 0.0))
+        if stage.kind == "generate":
+            return Observables(nd, comp, 0.0)
+        if stage.kind == "execute":
+            return Observables(nd, self.completion_tokens, self.earlier_equal)
+        if stage.kind in REPLACING:
+            if kept:
+                # the answer it replaced, and those that agreed with it, now
+                # agree with the new one exactly when the two are equal
+                return Observables(nd, comp, (self.earlier_equal + 1.0) * eq)
+            # a rejected answer is one more answer the held one is compared to
+            return Observables(self.n_distinct, self.completion_tokens,
+                               self.earlier_equal + eq)
+        return self
+
+
 @dataclass(frozen=True)
 class State:
     """What the planner knows about one question: the stages run and what they
     returned.  ``phi`` in :mod:`budgetsql.features` summarises it for the
-    world model's heads."""
+    world model's heads.
+
+    The held answer is the one Select kept: a replacing stage whose new answer
+    is rejected leaves the earlier answer, its producing stage and its
+    observation held.  Which replacing stages were rejected is part of the
+    branch, because every later stage --- a verification, a comparison of a
+    new answer with the held one --- reads the answer held.
+    """
 
     history: tuple[tuple[Stage, str], ...] = ()
     ctx: str = "full"
     answer_stage: Stage | None = None   # the stage that produced the held answer
     answer_obs: str | None = None       # its observation
     n_answers: int = 0
+    #: history indices of replacing stages whose answer Select rejected
+    rejected: tuple[int, ...] = ()
+    #: history index of the stage that produced the held answer
+    answer_index: int = -1
+    #: the observables after each stage, so a prefix can be replayed exactly
+    trail: tuple[Observables, ...] = ()
 
-    def append(self, stage: Stage, obs: str) -> "State":
+    @property
+    def observables(self) -> Observables:
+        return self.trail[-1] if self.trail else Observables()
+
+    def append(self, stage: Stage, obs: str, keep: bool = True, values=None,
+               observables: Observables | None = None) -> "State":
+        """The state after ``stage`` observed ``obs``.  For a replacing stage,
+        ``keep`` is Select's decision on its new answer.  ``values`` is what the
+        stage returned (a trace outcome, or the imputed means of a rollout);
+        ``observables`` sets the result directly, as a replay does."""
+        i = len(self.history)
         hist = self.history + ((stage, obs),)
         ctx = stage.ctx if stage.kind == "context" else self.ctx
+        kept = keep or self.answer_stage is None or stage.kind not in REPLACING
+        ob = observables if observables is not None else \
+            self.observables.after(stage, kept, values)
+        trail = self.trail + (ob,)
         if stage.kind in ANSWER_PRODUCING:
-            return State(hist, ctx, stage, obs, self.n_answers + 1)
+            if kept:
+                return State(hist, ctx, stage, obs, self.n_answers + 1,
+                             self.rejected, i, trail)
+            return State(hist, ctx, self.answer_stage, self.answer_obs,
+                         self.n_answers + 1, self.rejected + (i,), self.answer_index,
+                         trail)
         if stage.kind == "execute" and self.answer_stage is not None:
             # execution is what reveals the held answer's status
-            return State(hist, ctx, self.answer_stage, obs, self.n_answers)
-        return State(hist, ctx, self.answer_stage, self.answer_obs, self.n_answers)
+            return State(hist, ctx, self.answer_stage, obs, self.n_answers,
+                         self.rejected, self.answer_index, trail)
+        return State(hist, ctx, self.answer_stage, self.answer_obs, self.n_answers,
+                     self.rejected, self.answer_index, trail)
+
+    def kept(self, i: int) -> bool:
+        """Whether the answer of the ``i``-th stage was kept by Select."""
+        return i not in self.rejected
+
+    def replay(self, upto: int | None = None) -> "State":
+        """The state after the first ``upto`` stages, with the same decisions
+        and the same observables."""
+        out = State()
+        for i, (stage, obs) in enumerate(self.history[:upto]):
+            out = out.append(stage, obs, keep=self.kept(i),
+                             observables=self.trail[i] if i < len(self.trail) else None)
+        return out
 
     def before_last(self) -> "State":
         """The state as it stood before the last stage ran."""
-        out = State()
-        for stage, obs in self.history[:-1]:
-            out = out.append(stage, obs)
-        return out
+        return self.replay(len(self.history) - 1)
 
     # ---- bookkeeping the grammar needs ----
     @property
@@ -135,8 +219,9 @@ class State:
 
     @property
     def key(self) -> tuple[tuple[str, str], ...]:
-        """Branch key into the trace corpus."""
-        return tuple((s.id, o) for s, o in self.history)
+        """Branch key into the trace corpus; a rejected answer is marked."""
+        return tuple((s.id, o if i not in self.rejected else o + REJECTED)
+                     for i, (s, o) in enumerate(self.history))
 
     def __len__(self) -> int:
         return len(self.history)
@@ -297,35 +382,6 @@ class Grammar:
                 return False
         return wf.max_llm_calls() <= self.max_llm_calls
 
-    # ---- continuations the planner enumerates ----
-    def continuations(self, state: State, max_stages: int = 3) -> list[Workflow]:
-        """Every workflow the grammar admits from ``state`` up to ``max_stages``
-        answer-producing stages, stop included.  Branches that only observe are
-        followed automatically."""
-        out: list[Workflow] = [STOP]
-        if max_stages <= 0:
-            return out
-        for a in self.actions(state):
-            subtrees: dict[str, list[Workflow | None]] = {}
-            for obs in a.observations():
-                nxt = state.append(a, obs)
-                cost = 1 if a.kind in ANSWER_PRODUCING else 0
-                subs = self.continuations(nxt, max_stages - cost) if max_stages - cost > 0 else [STOP]
-                subtrees[obs] = subs
-            # one candidate per uniform choice of continuation, plus the
-            # observation-dependent trees the one-stage edits need
-            for sub in subtrees[a.observations()[0]]:
-                out.append(branch(a, {o: sub for o in a.observations()}))
-        # de-duplicate by shape
-        seen: set[str] = set()
-        uniq: list[Workflow] = []
-        for wf in out:
-            k = shape(wf)
-            if k not in seen:
-                seen.add(k)
-                uniq.append(wf)
-        return uniq
-
     def one_stage_edits(self, state: State, wf: Workflow) -> list[Workflow]:
         """One tier up or down, one stage added or removed."""
         out: list[Workflow] = []
@@ -356,6 +412,47 @@ class Grammar:
                 seen.add(k)
                 uniq.append(c)
         return uniq
+
+
+def token(stage: Stage) -> str:
+    """A stage in the agent's compact syntax (``parse_stage`` reads it back)."""
+    if stage.kind == "context":
+        return f"ctx:{stage.ctx}"
+    if stage.kind == "execute":
+        return "exec" if stage.samples == 1 else f"exec:{stage.samples}"
+    short = {"generate": "gen", "repair": "rep", "verify": "ver",
+             "escalate": "esc"}[stage.kind]
+    t = f"{short}:{stage.tier}" + (f"x{stage.samples}" if stage.samples > 1 else "")
+    if stage.kind == "generate" and stage.ctx != "full":
+        t += f"@{stage.ctx}"
+    return t
+
+
+def compact(wf: Workflow) -> str:
+    """A short text for a workflow: a chain ``ver:M,esc:L`` when every
+    observation continues the same way, otherwise the branches that continue,
+    ``exec[error>rep:L;empty>rep:L]``."""
+    if wf.is_stop:
+        return "stop"
+    subs = {o: wf.child(o) for o in wf.stage.observations()}
+    keys = {shape(w) for w in subs.values()}
+    head = token(wf.stage)
+    if len(keys) == 1:
+        rest = next(iter(subs.values()))
+        return head if rest.is_stop else f"{head},{compact(rest)}"
+    parts = [f"{o}>{compact(w)}" for o, w in subs.items() if not w.is_stop]
+    return f"{head}[{';'.join(parts)}]"
+
+
+def single_call_first(wf: Workflow) -> bool:
+    """Whether a composition's first call is a single call; a Context stage
+    before it calls nothing."""
+    node = wf
+    while node is not None and not node.is_stop:
+        if node.stage.llm_calls:
+            return node.stage.llm_calls == 1
+        node = next(iter(node.children.values()), None)
+    return False
 
 
 def shape(wf: Workflow) -> str:
@@ -473,3 +570,49 @@ def parse_chain(spec: str) -> Workflow:
     if not stages:
         return STOP
     return seq(*stages, name=spec.strip())
+
+
+def _split_top(text: str, sep: str) -> list[str]:
+    """Split at ``sep`` outside brackets."""
+    parts, depth, cur = [], 0, []
+    for ch in text:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        if ch == sep and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    parts.append("".join(cur))
+    return parts
+
+
+def parse_workflow(text: str) -> Workflow:
+    """Read the compact syntax ``compact`` writes: a chain ``ver:M,esc:L``, or
+    a stage whose observations continue differently,
+    ``exec[error>rep:L;empty>rep:L]`` (observations not listed stop)."""
+    text = text.strip()
+    if text in ("", "stop"):
+        return STOP
+    parts = _split_top(text, ",")
+    head, rest = parts[0].strip(), ",".join(parts[1:]).strip()
+    if "[" in head:
+        if not head.endswith("]") or rest:
+            raise ValueError(f"a branching stage ends its workflow: {text!r}")
+        i = head.index("[")
+        stage = parse_stage(head[:i])
+        mapping: dict[str, Workflow | None] = {}
+        for part in _split_top(head[i + 1:-1], ";"):
+            if not part.strip():
+                continue
+            obs, _, sub = part.partition(">")
+            obs = obs.strip()
+            if obs not in stage.observations():
+                raise ValueError(f"{stage.id} cannot observe {obs!r}")
+            mapping[obs] = parse_workflow(sub)
+        return branch(stage, mapping, name=text)
+    stage = parse_stage(head)
+    sub = parse_workflow(rest) if rest else None
+    return Workflow(stage, {o: sub for o in stage.observations()}, text)
