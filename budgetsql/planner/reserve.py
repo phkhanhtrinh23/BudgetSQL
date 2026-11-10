@@ -59,12 +59,13 @@ def bernstein_reserve(variances: np.ndarray, ranges: np.ndarray,
 
 
 def reserve_for(alloc: Allocation, block: int, duals: np.ndarray,
-                delta: float | None = None) -> np.ndarray:
+                delta: float | None = None, z: float | None = None) -> np.ndarray:
     """The reserve the next block of continuations deserves.
 
     With ``delta`` given, the log term is ``log(d/delta)`` and the reserve is the
-    one that bounds the miss probability; otherwise it follows the newsvendor
-    condition at the plan's own gain per priced unit.
+    one that bounds the miss probability; with ``z`` it is that many predicted
+    standard deviations; otherwise it follows the newsvendor condition at the
+    plan's own gain per priced unit.
     """
     order = run_order(alloc)[:max(0, block)]
     if not order:
@@ -74,8 +75,11 @@ def reserve_for(alloc: Allocation, block: int, duals: np.ndarray,
     for c in order:
         var = var + np.asarray(c.var, dtype=float)
         rng = np.maximum(rng, np.asarray(c.worst_case, dtype=float))
-    log_term = math.log(D / delta) if delta else math.log(max(1.0, theta(alloc)))
-    rho = bernstein_reserve(var, rng, log_term)
+    if z is not None:
+        rho = float(z) * np.sqrt(var)
+    else:
+        log_term = math.log(D / delta) if delta else math.log(max(1.0, theta(alloc)))
+        rho = bernstein_reserve(var, rng, log_term)
     duals = np.asarray(duals, dtype=float)
     rho = np.where(duals > 0, rho, 0.0)     # held only in priced dimensions
     return rho

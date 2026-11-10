@@ -13,6 +13,7 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 
 from ..baselines import BASELINES, Oracle
 from ..config import (PlannerConfig, Workload, budget_for_group,
@@ -22,6 +23,7 @@ from ..grammar import reference_library
 from ..planner import BudgetSQL, Meter, PlanningAgent
 from ..trace.corpus import TraceCorpus, split_dbs
 from ..worldmodel.stacking import CrossFitStacker, StackedValues
+from .pooled import PooledValues
 
 CACHE_VERSION = 2
 
@@ -74,6 +76,12 @@ class Workbench:
         return [BudgetGroup(db, [db], self.corpus.questions_of(db))
                 for db in self.corpus.dbs]
 
+    def pooled_group(self) -> BudgetGroup:
+        """Every question under one budget."""
+        groups = self.groups()
+        return BudgetGroup("pooled", [d for g in groups for d in g.dbs],
+                           [m for g in groups for m in g.metas])
+
     def train_dbs(self, group: BudgetGroup) -> list[str]:
         return [d for d in self.corpus.dbs if d not in group.dbs]
 
@@ -113,6 +121,25 @@ class Workbench:
         self._values[key] = out
         return out
 
+    def thinned_values(self, group: BudgetGroup, cfg: PlannerConfig | None = None
+                       ) -> StackedValues:
+        """The same calibration from a corpus that traces one composition per
+        training question rather than all of them."""
+        cfg = cfg or self.cfg
+        key = (f"thin-{CACHE_VERSION}-{group.name}-"
+               f"{_hash(cfg.training_key(), self.inner_folds)}")
+        if key in self._values:
+            return self._values[key]
+
+        def build() -> StackedValues:
+            stacker = CrossFitStacker(cfg, self.inner_folds, self.library,
+                                      self.corpus.grammar, thin=True)
+            return stacker.fit(self.corpus, group.dbs)
+
+        out = self._cached(key, build)
+        self._values[key] = out
+        return out
+
     def method(self, name: str, group: BudgetGroup, cfg: PlannerConfig | None = None):
         cfg = cfg or self.cfg
         key = (name, group.name + _hash(cfg.training_key()))
@@ -133,19 +160,50 @@ class Workbench:
         self._methods[key] = obj
         return obj
 
-    def planner(self, group: BudgetGroup, cfg: PlannerConfig | None = None,
-                agent=None) -> BudgetSQL:
+    def pooled_values(self, cfg: PlannerConfig | None = None) -> PooledValues:
         cfg = cfg or self.cfg
-        values = self.values(group, cfg).with_cfg(cfg)
+        by_db = {}
+        for group in self.groups():
+            values = self.values(group, cfg)
+            for db in group.dbs:
+                by_db[db] = values
+        return PooledValues(by_db, cfg)
+
+    def pooled_planner(self, cfg: PlannerConfig | None = None, agent=None) -> BudgetSQL:
+        cfg = cfg or self.cfg
+        values = self.pooled_values(cfg).with_cfg(cfg)
+        agent = agent if agent is not None else (
+            PlanningAgent() if cfg.use_agent else None)
+        return BudgetSQL(values, self.corpus, self.corpus.grammar, cfg, agent,
+                         self.library)
+
+    def planner(self, group: BudgetGroup, cfg: PlannerConfig | None = None,
+                agent=None, thinned: bool = False) -> BudgetSQL:
+        cfg = cfg or self.cfg
+        source = self.thinned_values if thinned else self.values
+        values = source(group, cfg).with_cfg(cfg)
         agent = agent if agent is not None else (
             PlanningAgent() if cfg.use_agent else None)
         return BudgetSQL(values, self.corpus, self.corpus.grammar, cfg, agent,
                          self.library)
 
     # ---- runs ----
+    def order_metas(self, metas: list[QuestionMeta], run: int,
+                    order: str = "random") -> list[QuestionMeta]:
+        """The order the questions arrive in."""
+        out = list(metas)
+        random.Random((run + 1) * 7919).shuffle(out)
+        rank = {"simple": 0, "moderate": 1, "challenging": 2}
+        if order == "easy_first":
+            out.sort(key=lambda m: rank.get(m.difficulty, 1))
+        elif order == "hard_first":
+            out.sort(key=lambda m: -rank.get(m.difficulty, 1))
+        return out
+
     def run_method(self, name: str, budget: str, runs: int | None = None,
                    cfg: PlannerConfig | None = None, agent=None,
-                   budget_scale: float = 1.0) -> dict:
+                   budget_scale: float = 1.0, order: str = "random",
+                   vector=None, thinned: bool = False) -> dict:
         """Run one method on every budget group, over several question orders."""
         cfg = cfg or self.cfg
         runs = runs or self.workload.runs
@@ -154,12 +212,15 @@ class Workbench:
         for r in range(runs):
             correct: dict[str, bool] = {}
             for group in self.groups():
-                metas = list(group.metas)
-                random.Random((r + 1) * 7919).shuffle(metas)
-                b = budget_for_group(budget, group.size) * budget_scale
+                metas = self.order_metas(group.metas, r, order)
+                if vector is None:
+                    b = budget_for_group(budget, group.size) * budget_scale
+                else:
+                    b = np.asarray(vector, dtype=float) * float(group.size)
                 meter = Meter(b, planning_cap=cfg.planning_cap if name == "budgetsql" else None)
                 if name == "budgetsql":
-                    res = self.planner(group, cfg, agent).run(metas, b, meter)
+                    res = self.planner(group, cfg, agent, thinned).run(metas, b,
+                                                                       meter)
                 else:
                     method = self.method(name, group, cfg)
                     model = getattr(method, "model", None)

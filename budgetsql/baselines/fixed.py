@@ -2,7 +2,9 @@
 
 ``BestFixedMixture`` picks, per budget group, the random mixture of workflows
 with the highest accuracy on other databases whose predicted mean cost fits the
-group's budget in every dimension.  ``OmniRouterStyle`` couples the batch in one
+group's budget in every dimension.  ``BestFixedWorkflow`` picks one workflow the
+same way, from the one-shot workflows of the reference table and the pruned
+``M_c+R_L``.  ``OmniRouterStyle`` couples the batch in one
 linear program, but solves it once on predictions made before any answer exists.
 ``Oracle`` is the hindsight optimum of the same relaxation with true outcomes.
 """
@@ -15,7 +17,7 @@ import numpy as np
 from scipy.optimize import linprog
 
 from ..config import zeros
-from ..grammar import State, Workflow
+from ..grammar import LIBRARY_ORDER, State, Workflow
 from ..planner.allocation import Candidate, solve
 from ..planner.meter import Meter
 from ..planner.planner import RunResult
@@ -81,6 +83,55 @@ class BestFixedMixture(Method):
             run_workflow(ctx, rec, wf)
         predicted = float(sum(self.profiles[n].acc * s for n, s in shares.items()))
         return self._result(records, meter, predicted)
+
+
+#: What a deployment that runs one workflow for every question may choose from:
+#: the one-shot reference workflows and the pruned repair chain.
+ONE_SHOT = tuple(LIBRARY_ORDER[:13]) + ("M_c+R_L",)
+
+
+@dataclass
+class BestFixedWorkflow(Method):
+    """The most accurate single workflow whose mean cost fits, chosen on the
+    other databases."""
+
+    name: str = "best_fixed_workflow"
+    profiles: dict[str, Profile] = field(default_factory=dict)
+    choice: str = ""
+
+    def prepare(self, corpus: TraceCorpus, train_dbs: list[str]
+                ) -> "BestFixedWorkflow":
+        super().prepare(corpus, train_dbs)
+        self.profiles = profile_library(corpus, train_dbs, self.library)
+        return self
+
+    def _choose(self, per_question: np.ndarray) -> str:
+        names = [n for n in ONE_SHOT
+                 if n in self.library and self.profiles.get(n, Profile()).n]
+        fits = [n for n in names
+                if np.all(self.profiles[n].cost <= per_question + 1e-12)]
+        pool = fits or names
+        return max(pool, key=lambda n: self.profiles[n].acc)
+
+    def run(self, metas, budget, meter=None) -> RunResult:
+        meter = meter or Meter(budget)
+        records = self._records(metas)
+        per_q = np.asarray(budget, dtype=float) / max(1, len(metas))
+        self.choice = self._choose(per_q)
+        wf = self.library[self.choice]
+        mean = self.profiles[self.choice].cost
+
+        from ..planner.execute import run_workflow
+        ctx = self._ctx(meter)
+        left = len(records)
+        for rec in records.values():
+            left -= 1
+            run = wf
+            if left and np.any(mean > self._pace(meter, left + 1)):
+                cheap = self._cheapest(rec.state)
+                run = cheap if cheap is not None else wf
+            run_workflow(ctx, rec, run)
+        return self._result(records, meter, self.profiles[self.choice].acc)
 
 
 @dataclass

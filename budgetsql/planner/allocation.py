@@ -71,9 +71,11 @@ class Allocation:
 
 def solve(candidates: list[Candidate], budget: np.ndarray,
           reserve: np.ndarray | None = None,
-          priced_dims: tuple[str, ...] = DIMS) -> Allocation:
+          priced_dims: tuple[str, ...] = DIMS,
+          time_limit: float | None = None) -> Allocation:
     """Solve the allocation program.  ``reserve`` is held back from the budget
-    for later planning turns and probes."""
+    for later planning turns and probes, and ``time_limit`` caps the solver's
+    own time, which a whole-batch program can exhaust."""
     if not candidates:
         return Allocation(np.zeros(0), 0.0, np.zeros(D), np.zeros(D), np.zeros(0), [], [])
 
@@ -104,8 +106,9 @@ def solve(candidates: list[Candidate], budget: np.ndarray,
     A_ub = coo_matrix((vals, (rows, cols)), shape=(len(dim_rows), m)).tocsr()
     b_ub = np.array([rhs[k] for k in dim_rows])
 
+    options = {"time_limit": float(time_limit)} if time_limit else None
     res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
-                  bounds=(0.0, None), method="highs-ds")
+                  bounds=(0.0, None), method="highs-ds", options=options)
     if not res.success or res.x is None:
         # fall back to the cheapest feasible candidate per question
         x = np.zeros(m)

@@ -25,16 +25,20 @@ PROFILES = {
 # --------------------------------------------------------------------------- #
 def make_corpus(args):
     from .trace import RecordedTrace, SimulatedTrace, TraceCorpus
+    workload = WORKLOADS.get(args.workload, WORKLOADS["bird"])
     if args.trace:
         source = RecordedTrace(args.trace)
     else:
-        source = SimulatedTrace(n_questions=args.questions, n_dbs=args.dbs,
-                                seed=args.seed, name=args.workload)
+        source = SimulatedTrace(
+            n_questions=args.questions or workload.n_questions,
+            n_dbs=args.dbs or workload.n_dbs,
+            seed=args.seed, name=args.workload)
     return TraceCorpus(source, Grammar(), max_states=args.max_states, seed=args.seed)
 
 
 def make_config(args) -> PlannerConfig:
-    cfg = PlannerConfig(**PROFILES.get(args.profile, {}))
+    workload = WORKLOADS.get(args.workload, WORKLOADS["bird"])
+    cfg = PlannerConfig(limits=workload.limits, **PROFILES.get(args.profile, {}))
     if getattr(args, "no_agent", False):
         cfg = cfg.with_(use_agent=False)
     if getattr(args, "runs", None):
@@ -68,7 +72,9 @@ def write(args, kind: str, result) -> None:
 # --------------------------------------------------------------------------- #
 def cmd_simulate(args) -> None:
     from .trace import SimulatedTrace, materialise, write_jsonl
-    src = SimulatedTrace(n_questions=args.questions, n_dbs=args.dbs, seed=args.seed,
+    workload = WORKLOADS.get(args.workload, WORKLOADS["bird"])
+    src = SimulatedTrace(n_questions=args.questions or workload.n_questions,
+                         n_dbs=args.dbs or workload.n_dbs, seed=args.seed,
                          name=args.workload)
     grammar = Grammar()
     n = write_jsonl(args.out, materialise(src, src.questions(), grammar,
@@ -144,11 +150,27 @@ def _exp():
             b, budgets=a.budgets, runs=1)),
         "scenarios": ("scenarios", lambda b, a: x.scenarios(
             b, budget=(a.budgets or ["V4"])[0], runs=1)),
+        "grid": ("grid", lambda b, a: x.budget_grid(b, runs=a.runs or 3)),
+        "pooled": ("pooled", lambda b, a: x.pooled_budget(b, budgets=a.budgets,
+                                                          runs=a.runs)),
+        "orders": ("orders", lambda b, a: x.arrival_orders(b, budgets=a.budgets,
+                                                           runs=a.runs)),
+        "strata": ("strata", lambda b, a: x.strata(b, budgets=a.budgets,
+                                                   runs=a.runs)),
+        "perdb": ("perdb", lambda b, a: x.per_database(b, budgets=a.budgets,
+                                                       runs=a.runs)),
+        "calibration": ("calibration", lambda b, a: x.calibration(
+            b, budget=(a.budgets or ["V4"])[0], runs=a.runs or 1)),
+        "unprofiled": ("unprofiled", lambda b, a: x.unprofiled_trace(
+            b, budget=(a.budgets or ["V4"])[0])),
+        "scaling": ("scaling", lambda b, a: x.scaling(b)),
     }
 
 
-EXPERIMENT_NAMES = ("main", "sweep", "ablation", "sensitivity", "online",
-                    "overhead", "frontier", "worldmodel", "plans", "scenarios")
+EXPERIMENT_NAMES = ("main", "sweep", "grid", "pooled", "ablation", "sensitivity",
+                    "online", "overhead", "scaling", "frontier", "worldmodel",
+                    "calibration", "unprofiled", "plans", "scenarios", "orders",
+                    "strata", "perdb")
 
 
 def cmd_exp(args) -> None:
@@ -171,8 +193,9 @@ def build_parser() -> argparse.ArgumentParser:
     def common(sp, trace=True, out=True):
         if trace:
             sp.add_argument("--trace", help="recorded trace corpus (JSONL)")
-        sp.add_argument("--questions", type=int, default=1530)
-        sp.add_argument("--dbs", type=int, default=11)
+        sp.add_argument("--questions", type=int, default=0,
+                        help="0 takes the workload's own size")
+        sp.add_argument("--dbs", type=int, default=0)
         sp.add_argument("--seed", type=int, default=0)
         sp.add_argument("--max-states", dest="max_states", type=int, default=32)
         sp.add_argument("--workload", default="bird", choices=sorted(WORKLOADS))

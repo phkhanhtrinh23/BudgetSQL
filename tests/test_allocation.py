@@ -43,3 +43,18 @@ def test_budget_is_respected_and_reserve_is_held_where_priced():
                             np.log(2.0))
     assert np.all(rho >= 0)
     assert len(run_order(alloc)) <= len(alloc.candidates)
+
+
+def test_reserve_z_is_proportional_to_the_predicted_deviation():
+    import numpy as np
+    from budgetsql.config import zeros
+    from budgetsql.planner.allocation import Candidate, solve
+    from budgetsql.planner.reserve import reserve_for
+    cost = np.array([1.0, 10.0, 1.0])
+    cands = [Candidate("q", "w", 0.8, cost, cost ** 2, cost * 2),
+             Candidate("q", "stop", 0.2, zeros(), zeros(), zeros(), is_stop=True)]
+    alloc = solve(cands, np.array([4.0, 40.0, 4.0]))
+    one = reserve_for(alloc, 1, np.ones(3), z=1.0)
+    two = reserve_for(alloc, 1, np.ones(3), z=2.0)
+    assert np.allclose(two, 2.0 * one)
+    assert np.allclose(reserve_for(alloc, 1, np.zeros(3), z=1.0), 0.0)

@@ -106,6 +106,7 @@ class StageWorldModel:
         self._cache: dict[tuple, StagePrediction] = {}
         self._kappa: dict[tuple[str, str, int], float] = {}
         self._cost_obs: dict[tuple[str, str, int], tuple[float, float]] = {}
+        self._logit_shift: dict[str, float] = {}
         self._diff_mask = differential_mask()
 
     # ------------------------------------------------------------------ #
@@ -252,16 +253,72 @@ class StageWorldModel:
 
     def _scaled(self, pred: StagePrediction, meta: QuestionMeta,
                 stage: Stage) -> StagePrediction:
-        """Apply the online cost corrections of this database and stage type."""
-        if not self.cfg.online_cost_updates:
+        """Apply this database's online cost corrections and, where a batch has
+        been recalibrated, the shift of its correctness predictions."""
+        shift = self._logit_shift.get(meta.db, 0.0)
+        scale = np.ones(D)
+        if self.cfg.online_cost_updates:
+            scale = np.array([self._kappa.get((meta.db, stage.kind, k), 1.0)
+                              for k in range(D)])
+        if np.allclose(scale, 1.0) and shift == 0.0:
             return pred
-        scale = np.array([self._kappa.get((meta.db, stage.kind, k), 1.0) for k in range(D)])
-        if np.allclose(scale, 1.0):
-            return pred
-        out = StagePrediction(pred.stage_kind, pred.labels, pred.p_given_correct,
-                              pred.p_given_wrong, pred.s_new, pred.fix, pred.reg,
-                              pred.mu * scale, pred.var * scale ** 2, pred.uncertain)
-        return out
+        s_new = pred.s_new if shift == 0.0 else _shifted(pred.s_new, shift)
+        return StagePrediction(pred.stage_kind, pred.labels, pred.p_given_correct,
+                               pred.p_given_wrong, s_new, pred.fix, pred.reg,
+                               pred.mu * scale, pred.var * scale ** 2,
+                               pred.uncertain)
+
+    # ------------------------------------------------------------------ #
+    # within-batch recalibration
+    # ------------------------------------------------------------------ #
+    def recalibrate(self, db: str, items: list[tuple[QuestionMeta, State]],
+                    grid: int = 101) -> float:
+        """Fit this database's share of correct answers from what its first
+        stages observed, and shift the correctness predictions to match it.
+
+        Each stage's observation distribution is stored conditioned on the held
+        answer's correctness, so the observed shares of execution errors, empty
+        results and agreement identify the share correct without any reference
+        label.
+        """
+        pi = self.estimate_accuracy(items, grid)
+        if pi is None:
+            return 0.0
+        return self.calibrate_to(db, items, pi)
+
+    def calibrate_to(self, db: str, items: list[tuple[QuestionMeta, State]],
+                     target: float) -> float:
+        """Shift this database's correctness predictions onto a known share."""
+        if not items:
+            return 0.0
+        s_now = float(np.mean(self.s_of_many(items)))
+        shift = _shift_to(s_now, target)
+        self._logit_shift[db] = shift
+        self._cache.clear()
+        return shift
+
+    def estimate_accuracy(self, items: list[tuple[QuestionMeta, State]],
+                          grid: int = 101) -> float | None:
+        """The share of correct answers the observed observations imply."""
+        rows = []
+        for meta, state in items:
+            if not state.history:
+                continue
+            stage, obs = state.history[-1]
+            pred = self.predict(meta, state.before_last(), stage)
+            try:
+                j = pred.labels.index(obs)
+            except ValueError:
+                continue
+            rows.append((float(pred.p_given_correct[j]),
+                         float(pred.p_given_wrong[j])))
+        if not rows:
+            return None
+        pis = np.linspace(0.0, 1.0, grid)
+        pc = np.array([r[0] for r in rows])
+        pw = np.array([r[1] for r in rows])
+        like = np.log(np.maximum(np.outer(pis, pc) + np.outer(1.0 - pis, pw), EPS))
+        return float(pis[int(np.argmax(like.sum(axis=1)))])
 
     # ------------------------------------------------------------------ #
     # the held answer
@@ -397,6 +454,7 @@ class StageWorldModel:
     def reset_online(self) -> None:
         self._kappa.clear()
         self._cost_obs.clear()
+        self._logit_shift.clear()
 
 
 def _collect(meta: QuestionMeta, state: State, wf: Workflow,
@@ -420,6 +478,19 @@ def _worst_case(stage: Stage) -> np.ndarray:
     return np.array([price.out * stage.cap * 1e-6 * stage.samples,
                      float(stage.cap * stage.samples),
                      10.0 * stage.samples])
+
+
+def _shifted(s: float, shift: float) -> float:
+    s = float(np.clip(s, EPS, 1.0 - EPS))
+    odds = s / (1.0 - s) * float(np.exp(shift))
+    return float(odds / (1.0 + odds))
+
+
+def _shift_to(s_now: float, target: float) -> float:
+    """The shift in log-odds that moves ``s_now`` onto ``target``."""
+    a = float(np.clip(s_now, EPS, 1.0 - EPS))
+    b = float(np.clip(target, EPS, 1.0 - EPS))
+    return float(np.log(b / (1.0 - b)) - np.log(a / (1.0 - a)))
 
 
 def _onehot(idx: np.ndarray, n: int) -> np.ndarray:

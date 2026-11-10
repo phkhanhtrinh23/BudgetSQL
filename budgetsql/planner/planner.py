@@ -32,11 +32,6 @@ from .meter import Meter
 #: The compositions the opening solve chooses a first stage from.
 OPENING_CANDIDATES = tuple(LIBRARY_ORDER)
 
-#: How many sessions of the agent one batch may hold, which with the turns per
-#: session and the planning cap bounds what planning can cost.
-MAX_SESSIONS = 4
-
-
 @dataclass
 class QuestionRecord:
     meta: QuestionMeta
@@ -202,7 +197,7 @@ class BudgetSQL:
     def _agent_available(self) -> bool:
         if not (self.cfg.use_agent and self.agent is not None):
             return False
-        if self._turns >= self.cfg.turns_per_session * MAX_SESSIONS:
+        if self._turns >= self.cfg.turns_per_session * self.cfg.max_sessions:
             return False
         cap = self.cfg.planning_cap * self.meter.budget[0]
         return bool(self.meter.stats.planning_spend[0] + self._turn_worst_case()[0]
@@ -340,7 +335,8 @@ class BudgetSQL:
         res = reserve if reserve is not None else self._planning_reserve()
         alloc = self._solve(cands, reserve=res)
         rho = reserve_mod.reserve_for(alloc, self.cfg.replan_block, alloc.duals,
-                                      delta=self.cfg.reserve_delta)
+                                      delta=self.cfg.reserve_delta,
+                                      z=self.cfg.reserve_z)
         if np.any(rho > 0):
             alloc = self._solve(cands, reserve=res, rho=rho)
         for qid, cand in alloc.chosen().items():
@@ -393,8 +389,11 @@ class BudgetSQL:
             return
         s = np.array([r.s_held for r in open_recs])
         c = np.array([float(r.spend[0]) for r in open_recs])
-        s_edges = np.quantile(s, [0.33, 0.66]) if len(s) > 3 else [0.33, 0.66]
-        c_edges = np.quantile(c, [0.5]) if len(c) > 3 else [0.0]
+        deciles = np.linspace(0.1, 0.9, 9)
+        s_edges = (np.unique(np.quantile(s, deciles)) if len(s) > len(deciles)
+                   else np.array([0.33, 0.66]))
+        c_edges = (np.unique(np.quantile(c, deciles)) if len(c) > len(deciles)
+                   else np.array([0.0]))
         for r in open_recs:
             si = int(np.searchsorted(s_edges, r.s_held))
             ci = int(np.searchsorted(c_edges, float(r.spend[0])))

@@ -66,9 +66,10 @@ def run_workflow(ctx: ExecutionContext, rec, wf: Workflow) -> StepReport:
             resolved = pred.resolve(rec.s_held)
             mu = pred.mu
 
-        cap = stage.cap
+        ceiling = ctx.cfg.limits.cap_for(stage.tier, stage.cap)
+        cap = ceiling
         if stage.llm_calls:
-            cap = ctx.meter.affordable_completion(stage, prompt)
+            cap = ctx.meter.affordable_completion(stage, prompt, ceiling)
             if cap < MIN_USEFUL_COMPLETION:
                 report.refused = True
                 return report

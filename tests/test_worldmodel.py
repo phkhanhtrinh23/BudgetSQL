@@ -44,3 +44,31 @@ def test_online_cost_updates_move_towards_the_realised_cost(corpus, values):
     assert np.all(after >= before - 1e-12)
     assert after[0] > before[0]
     model.reset_online()
+
+
+def test_recalibration_moves_predictions_onto_the_observed_share(corpus, values):
+    model = values.model
+    db = corpus.dbs[-1]
+    metas = corpus.questions_of(db)
+    items = []
+    for meta in metas:
+        state, _, _, _ = corpus.run(meta, State(), parse_chain("gen:M,exec"))
+        items.append((meta, state))
+    before = float(np.mean(model.s_of_many(items)))
+    target = min(0.95, max(0.05, before + 0.3))
+    model.calibrate_to(db, items, target)
+    after = float(np.mean(model.s_of_many(items)))
+    assert abs(after - target) < abs(before - target)
+    model.reset_online()
+
+
+def test_observed_shares_identify_a_share_of_correct_answers(corpus, values):
+    model = values.model
+    metas = corpus.questions_of(corpus.dbs[-1])
+    items, real = [], []
+    for meta in metas:
+        state, ok, _, _ = corpus.run(meta, State(), parse_chain("gen:M,exec"))
+        items.append((meta, state))
+        real.append(1.0 if ok else 0.0)
+    pi = model.estimate_accuracy(items)
+    assert pi is None or 0.0 <= pi <= 1.0

@@ -123,6 +123,12 @@ def overhead(res: dict) -> str:
             for b, d in res["budgets"].items()]
     out = ["Planning overhead",
            table(["budget", "money", "tokens", "time", "turns", "wall s"], rows)]
+    if res.get("sessions"):
+        out += ["", table(["sessions", "accuracy", "turns", "planning share"],
+                          [[str(r["requested"]), f"{r['accuracy']:.2f}",
+                            f"{r['turns']:.1f}",
+                            f"{r['planning_share']['usd'] * 100:.1f}%"]
+                           for r in res["sessions"]])]
     if res.get("batches"):
         out += ["", table(["batch", "accuracy", "turns", "planning share"],
                           [[str(r["n"]), f"{r['accuracy']:.2f}", f"{r['turns']}",
@@ -132,13 +138,17 @@ def overhead(res: dict) -> str:
 
 
 def online(res: dict) -> str:
-    rows = [[str(r["day"]), f"{r['updated']['accuracy']:.2f}",
-             f"{r['frozen']['accuracy']:.2f}", f"{r['gain']:+.2f}",
-             f"{r['updated']['cancelled']}", f"{r['frozen']['cancelled']}"]
-            for r in res["days"]]
-    return ("Online cost updates over daily batches\n"
-            + table(["day", "updated", "frozen", "gain", "cuts (upd)",
-                     "cuts (frozen)"], rows))
+    arms = ("frozen", "updated", "recalibrated", "labelled")
+    rows = []
+    for r in res["days"]:
+        cells = [str(r["day"])]
+        cells += [f"{r[a]['accuracy']:.2f}" if a in r else "-" for a in arms]
+        cells += [f"{r.get(f'gain_{a}', 0.0):+.2f}" for a in arms[1:]]
+        cells.append(f"{r['updated']['cancelled']}")
+        rows.append(cells)
+    return ("Online cost updates, within-batch recalibration and late labels\n"
+            + table(["day"] + list(arms) + [f"gain {a}" for a in arms[1:]]
+                    + ["cuts"], rows))
 
 
 def scenarios(res: dict) -> str:
@@ -165,10 +175,107 @@ def sweep(res: dict) -> str:
             f"{res['base']})\n" + table(["method"] + [f"x{s:g}" for s in scales], rows))
 
 
+def grid(res: dict) -> str:
+    out = []
+    for pair, d in res["pairs"].items():
+        x, y = pair.split("x")
+        rows = [[f"{c[x]:g}", f"{c[y]:g}", f"{c['accuracy']:.2f}",
+                 c["strongest_baseline"], f"{c['lead']['mean']:+.2f}",
+                 "*" if c["lead"]["excludes_zero"] else ""]
+                for c in d["cells"]]
+        out += [f"Lead when {x} crosses {y} "
+                f"({d['excludes_zero']}/{d['n']} cells exclude zero)",
+                table([x, y, "planner", "strongest", "lead", ""], rows), ""]
+    return "\n".join(out)
+
+
+def pooled(res: dict) -> str:
+    rows = []
+    for b, d in res["budgets"].items():
+        ld = d["lead"] or {"mean": 0.0, "ci": [0.0, 0.0]}
+        rows.append([b, f"{d['planner']['accuracy']:.2f}",
+                     d["strongest_baseline"] or "-",
+                     f"{ld['mean']:+.2f}",
+                     f"[{ld['ci'][0]:+.2f}, {ld['ci'][1]:+.2f}]"])
+    return (f"One budget for all {res['n_questions']} questions\n"
+            + table(["budget", "planner", "strongest", "lead", "95% CI"], rows))
+
+
+def orders(res: dict) -> str:
+    rows = []
+    for b, d in res["budgets"].items():
+        for order, r in d.items():
+            rows.append([b, order, f"{r['accuracy']:.2f}", r["strongest_baseline"],
+                         f"{r['lead']['mean']:+.2f}",
+                         f"{r['change_vs_random']:+.2f}"])
+    return ("Lead under other arrival orders\n"
+            + table(["budget", "order", "planner", "strongest", "lead",
+                     "vs random"], rows))
+
+
+def strata(res: dict) -> str:
+    out = []
+    for b, d in res["budgets"].items():
+        rows = [[kind, label, f"{r['share'] * 100:.0f}%", f"{r['accuracy']:.2f}",
+                 f"{r['baseline']:.2f}", f"{r['gain']:+.2f}"]
+                for kind, labels in d.items() for label, r in labels.items()]
+        out += [f"Accuracy by stratum in {b}",
+                table(["stratum", "label", "share", "planner", "best baseline",
+                       "gain"], rows), ""]
+    return "\n".join(out)
+
+
+def perdb(res: dict) -> str:
+    out = []
+    for b, d in res["budgets"].items():
+        rows = [[g, f"{r['accuracy']:.2f}", r["strongest_baseline"],
+                 f"{r['baseline_accuracy']:.2f}", f"{r['gain']:+.2f}"]
+                for g, r in d["groups"].items()]
+        out += [f"{b}: ahead on {d['ahead']}/{d['units']} budget groups",
+                table(["group", "planner", "strongest", "baseline", "gain"],
+                      rows), ""]
+    return "\n".join(out)
+
+
+def calibration(res: dict) -> str:
+    rows = [[f"{r['lo']:.1f}-{r['hi']:.1f}", f"{r['predicted']:.3f}",
+             f"{r['realised']:.3f}", str(r["n"])] for r in res["bins"]]
+    return (f"Reliability of the selected continuations in {res['budget']} "
+            f"(Brier {res['brier']:.3f}, ECE {res['ece']:.3f})\n"
+            + table(["predicted", "mean predicted", "realised", "n"], rows))
+
+
+def unprofiled(res: dict) -> str:
+    rows = [[k, f"{r['auroc_full_trace']:.3f}", f"{r['auroc_thinned']:.3f}",
+             f"{r['accuracy_full_trace']:.2f}", f"{r['accuracy_thinned']:.2f}",
+             f"{r['drop']:+.2f}"]
+            for k, r in res["arms"].items()]
+    return (f"A corpus that traces one composition per question "
+            f"({res['points_per_auroc']:.1f} points per AUROC)\n"
+            + table(["model", "AUROC full", "AUROC thinned", "EX full",
+                     "EX thinned", "drop"], rows))
+
+
+def scaling(res: dict) -> str:
+    rows = []
+    for r in res["rows"]:
+        whole = "-" if r["whole_s"] is None else (
+            f"{r['whole_s']:.1f}" + ("" if r["whole_done"] else " (cut)"))
+        rows.append([str(r["n"]), f"{r['score_s']:.1f}", str(r["groups"]),
+                     f"{r['group_total_s']:.1f}", f"{r['group_ms']:.0f}", whole])
+    return (f"Local CPU time of planning, groups of {res['group_size']} "
+            f"questions, whole-batch limit {res['limit_s']:g}s\n"
+            + table(["questions", "score s", "groups", "group LPs s",
+                     "per group ms", "whole batch s"], rows))
+
+
 RENDERERS = {
     "main": main_table, "ablation": ablation, "frontier": frontier,
     "world_model": world_model, "sensitivity": sensitivity, "overhead": overhead,
     "online": online, "scenarios": scenarios, "library": library, "sweep": sweep,
+    "grid": grid, "pooled": pooled, "orders": orders, "strata": strata,
+    "perdb": perdb, "calibration": calibration, "unprofiled": unprofiled,
+    "scaling": scaling,
 }
 
 

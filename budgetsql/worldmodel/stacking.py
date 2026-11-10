@@ -10,6 +10,7 @@ was scored by heads that saw neither the planned database nor the row's own.
 """
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -182,13 +183,29 @@ class CrossFitStacker:
                  grammar: Grammar | None = None,
                  openers: tuple[str, ...] = ("S", "M", "L"),
                  continuations: tuple[str, ...] = ("rep:L", "rep:M",
-                                                   "esc:M", "esc:L")):
+                                                   "esc:M", "esc:L"),
+                 thin: bool = False):
         self.cfg = cfg or PlannerConfig()
         self.inner_folds = inner_folds
         self.grammar = grammar or Grammar()
         self.workflows = workflows or {}
         self.openers = openers
         self.continuations = continuations
+        self.thin = thin
+
+    def _keeps(self, meta, oname: str, spec: str) -> bool:
+        """Whether a thinned corpus traces this composition on this question.
+
+        A thinned corpus records one composition per question, as a deployment
+        that cannot replay everything would, so no question has the outcome of
+        a whole workflow other than its own.
+        """
+        if not self.thin:
+            return True
+        combos = [(o, c) for o in self.openers
+                  for c in ("stop",) + tuple(self.continuations)]
+        pick = combos[zlib.crc32(meta.qid.encode()) % len(combos)]
+        return pick == (oname, spec)
 
     def fit(self, corpus: TraceCorpus, holdout: str | list[str]) -> StackedValues:
         held = {holdout} if isinstance(holdout, str) else set(holdout)
@@ -250,6 +267,8 @@ class CrossFitStacker:
                                                       state_descriptor(state)])
                           for meta, state in zip(metas, states)}
             for meta, state, stop, held in zip(metas, states, stops, helds):
+                if not self._keeps(meta, oname, "stop"):
+                    continue
                 rows.append(_Row(
                     features=state_rows[id(state)],
                     state_features=state_rows[id(state)],
@@ -258,7 +277,8 @@ class CrossFitStacker:
             for spec, chain in chains.items():
                 eligible = [(m, s, st, h) for m, s, st, h
                             in zip(metas, states, stops, helds)
-                            if self.grammar.is_wellformed(chain, s)]
+                            if self.grammar.is_wellformed(chain, s)
+                            and self._keeps(m, oname, spec)]
                 if not eligible:
                     continue
                 rolls = inner.rollout_many([(m, s, chain) for m, s, _, _ in eligible],

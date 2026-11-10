@@ -28,3 +28,15 @@ def test_oracle_is_an_upper_reference(corpus, cfg, library):
     best.prepare(corpus, [d for d in corpus.dbs if d != corpus.dbs[-1]])
     other = best.run(metas, b, Meter(b))
     assert res.accuracy >= other.accuracy - 1e-9
+
+
+def test_best_fixed_workflow_picks_one_affordable_workflow(corpus, cfg, library):
+    from budgetsql.baselines.fixed import ONE_SHOT, BestFixedWorkflow
+    metas = corpus.questions_of(corpus.dbs[-1])
+    method = BestFixedWorkflow(name="w", cfg=cfg, library=library)
+    method.prepare(corpus, [d for d in corpus.dbs if d != corpus.dbs[-1]])
+    b = budget_for_group("V4", len(metas))
+    method.run(metas, b, Meter(b))
+    assert method.choice in ONE_SHOT
+    per_q = b / len(metas)
+    assert np.all(method.profiles[method.choice].cost <= per_q + 1e-12)

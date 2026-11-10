@@ -98,6 +98,13 @@ class State:
             return State(hist, ctx, self.answer_stage, obs, self.n_answers)
         return State(hist, ctx, self.answer_stage, self.answer_obs, self.n_answers)
 
+    def before_last(self) -> "State":
+        """The state as it stood before the last stage ran."""
+        out = State()
+        for stage, obs in self.history[:-1]:
+            out = out.append(stage, obs)
+        return out
+
     # ---- bookkeeping the grammar needs ----
     @property
     def llm_calls(self) -> int:

@@ -47,11 +47,26 @@ PRICES: dict[str, Price] = {
 }
 
 
+#: The completion cap a stage carries unless it asks for less, as ``verify``
+#: does.  A workload's :class:`ExecutorLimits` replaces it.
+DEFAULT_COMPLETION = 600
+
+
 @dataclass(frozen=True)
 class ExecutorLimits:
-    max_completion_tokens: int = 600
+    max_completion_tokens: int = DEFAULT_COMPLETION
     timeout_s: float = 10.0
     sql_timeout_s: float = 10.0
+    #: Completion cap of the large tier, where it reasons before answering.
+    #: ``None`` gives it the same cap as the others.
+    large_completion_tokens: int | None = None
+
+    def cap_for(self, tier: str | None = None, stage_cap: int | None = None) -> int:
+        if stage_cap is not None and stage_cap < DEFAULT_COMPLETION:
+            return int(stage_cap)
+        if tier == "L" and self.large_completion_tokens:
+            return int(self.large_completion_tokens)
+        return int(self.max_completion_tokens)
 
 
 @dataclass(frozen=True)
@@ -74,6 +89,9 @@ class PlannerConfig:
     #: follows the newsvendor condition at the plan's own gain per priced
     #: unit, which is what a hard meter leaves it to do.
     reserve_delta: float | None = None
+    #: Ablation: a reserve of ``reserve_z`` predicted standard deviations
+    #: instead of the newsvendor bound.
+    reserve_z: float | None = None
     use_allocation_lp: bool = True # ablation: greedy ranking instead of the LP
     periodic_resolves: bool = True
     priced_dims: tuple[str, ...] = DIMS  # ablation: ("usd",) prices money alone
@@ -83,6 +101,7 @@ class PlannerConfig:
     digest_tokens: int = 1400
     latent_tokens: int = 64
     turns_per_session: int = 6
+    max_sessions: int = 11
     planning_cap: float = 0.10     # share of the money budget planning may take
     max_candidates: int = 8        # W_max per question
     probe_questions: int = 8
@@ -139,16 +158,44 @@ class Workload:
     folds: int = 1
     runs: int = 5
     budgets: tuple[str, ...] = ("V1", "V2", "V3", "V4")
+    n_questions: int = 1530
+    n_dbs: int = 11
+    limits: ExecutorLimits = field(default_factory=ExecutorLimits)
+    #: The model each tier names on this workload.  Spider 2.0-Lite needs a
+    #: reasoning model as the large tier to answer anything.
+    models: dict[str, str] = field(default_factory=lambda: {
+        "S": "qwen2.5-7b-instruct", "M": "gpt-4.1-mini", "L": "gpt-4.1"})
 
+
+#: Spider 2.0-Lite prompts are several times as long as BIRD's and its large
+#: tier reasons, so both caps and the timeout are larger.
+SPIDER_LIMITS = ExecutorLimits(max_completion_tokens=1600, timeout_s=120.0,
+                               sql_timeout_s=120.0,
+                               large_completion_tokens=8000)
 
 WORKLOADS: dict[str, Workload] = {
     "bird": Workload("bird", budget_groups="db", runs=5,
-                     budgets=("V1", "V2", "V3", "V4")),
+                     budgets=("V1", "V2", "V3", "V4"),
+                     n_questions=1530, n_dbs=11),
     "spider2_lite": Workload("spider2_lite", budget_groups="fold", folds=10,
-                             runs=5, budgets=("SP",)),
+                             runs=5, budgets=("SP",),
+                             n_questions=135, n_dbs=30, limits=SPIDER_LIMITS,
+                             models={"S": "qwen2.5-7b-instruct",
+                                     "M": "gpt-4.1-mini", "L": "gpt-5"}),
 }
 
 BOOTSTRAP_RESAMPLES = 4000
+
+#: The axes the budget grid crosses: money in USD, tokens and service seconds
+#: per question.  Money crosses time and money crosses tokens, 25 cells each.
+GRID_AXES: dict[str, tuple[float, ...]] = {
+    "usd": (0.6e-3, 0.8e-3, 1.0e-3, 1.25e-3, 1.6e-3),
+    "tok": (1000.0, 1300.0, 1800.0, 2600.0, 6000.0),
+    "sec": (1.6, 2.0, 2.6, 3.4, 8.0),
+}
+
+#: The slack a dimension the grid does not vary receives.
+GRID_SLACK: dict[str, float] = {"usd": 4.0e-3, "tok": 20000.0, "sec": 40.0}
 
 
 def budget_for_group(name: str, n_questions: int) -> np.ndarray:

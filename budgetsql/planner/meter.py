@@ -138,11 +138,12 @@ class Meter:
         return bool(self.stats.planning_spend[0] + worst_case[0] <= cap + 1e-12)
 
     # ---- limits a remaining budget can pay for ----
-    def affordable_completion(self, stage: Stage, prompt_tokens: float) -> int:
+    def affordable_completion(self, stage: Stage, prompt_tokens: float,
+                              ceiling: int | None = None) -> int:
         """The completion limit the remaining budget can pay for."""
         price = PRICES.get(stage.tier)
         free = self.free
-        cap = stage.cap
+        cap = stage.cap if ceiling is None else int(ceiling)
         if price is None:
             return cap
         per_sample = max(1, stage.samples)

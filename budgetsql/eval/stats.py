@@ -6,13 +6,21 @@ or a fold of databases) is the mean over the paired runs of the difference in
 accuracy on that unit, and the mean lead weights units by their questions.  The
 standard error adds the bootstrap variance over units to the variance of the
 answers on which the two methods differ, so it is never smaller than the paired
-standard error.
+standard error.  A lead's interval uses Student's t on the units; a contrast
+between two arms of the same method uses the paired standard error alone.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import stats as sps
+
+
+def t_quantile(units: int, level: float = 0.95) -> float:
+    """The two-sided quantile of Student's t on ``units`` units."""
+    df = max(1, units - 1)
+    return float(sps.t.ppf(0.5 + level / 2.0, df))
 
 
 @dataclass
@@ -30,7 +38,7 @@ class Lead:
 
     @property
     def half_width(self) -> float:
-        return 1.96 * self.standard_error
+        return 0.5 * (self.hi - self.lo)
 
     def as_dict(self) -> dict:
         return {"mean": self.mean, "se": self.standard_error,
@@ -94,7 +102,8 @@ def lead(a_runs: list[dict[str, bool]], b_runs: list[dict[str, bool]],
     se_paired = paired_se(differ / max(1, total), len(qids)) * 100.0
     se = float(np.sqrt(se_units ** 2 + se_paired ** 2))
     wins = sum(1 for u in gains if gains[u] > 0)
-    return Lead(mean, se, mean - 1.96 * se, mean + 1.96 * se, wins, len(gains))
+    half = t_quantile(len(gains)) * se
+    return Lead(mean, se, mean - half, mean + half, wins, len(gains))
 
 
 def accuracy(runs: list[dict[str, bool]]) -> tuple[float, float]:
@@ -121,5 +130,6 @@ def paired_contrast(a_runs: list[dict[str, bool]], b_runs: list[dict[str, bool]]
         diffs.append(float(np.mean(d)))
     mean = float(np.mean(diffs)) * 100.0
     se = paired_se(differ / max(1, len(qids) * len(a_runs)), len(qids)) * 100.0
-    return Lead(mean, se, mean - 1.96 * se, mean + 1.96 * se,
+    half = 1.96 * se
+    return Lead(mean, se, mean - half, mean + half,
                 sum(1 for d in diffs if d > 0), len(diffs))
