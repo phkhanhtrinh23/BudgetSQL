@@ -236,7 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--profile", default="full", choices=sorted(PROFILES))
         sp.add_argument("--cache", default="runs/cache")
         sp.add_argument("--effects", help="modelled agent effects (JSON) that "
-                        "BudgetSQL's replayed accuracy carries (Sec. VII-A)")
+                        "BudgetSQL's replayed accuracy carries")
         sp.add_argument("--live-agent", dest="live_agent", action="store_true",
                         help="take the agent's turns instead of modelling them")
         sp.add_argument("--chat-agent", dest="chat_agent", action="store_true",

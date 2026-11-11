@@ -2,7 +2,7 @@
 
 The meter never trusts a prediction.  Calls may run in parallel, so budget is
 reserved at launch: a call starts only if its worst case fits what is left after
-the spend and the reservations in flight (Prop. 1).  The worst case is the
+the spend and the reservations in flight.  The worst case is the
 call's prompt, whose tokens and price are known before sending, plus its
 completion limit and its timeout for every sample it draws, plus the timeout of
 every SQL statement it runs.  Those limits are set to what the remainder can pay

@@ -1,7 +1,7 @@
 """Running a workflow's stages on a question under the meter.
 
 Shared by the planner and by every method it is compared with, so all of them
-launch, cap and charge calls the same way (Prop. 1): a stage runs only if its
+launch, cap and charge calls the same way: a stage runs only if its
 worst case fits what is left, its completion limit and timeouts are whatever the
 remainder can pay for, and a call that reaches a limit --- completion tokens,
 the LLM timeout or the SQL timeout --- is cancelled: charged what it consumed
@@ -26,7 +26,7 @@ class ExecutionContext:
     meter: Meter
     cfg: PlannerConfig
     grammar: Grammar
-    model: object | None = None      # a world model, when one is available
+    model: object | None = None
     #: Apply BudgetSQL's Select rule to a replacing stage's new answer.  A
     #: baseline that reimplements another decision rule keeps the new answer,
     #: as that rule does, and reads the world model only for its scores.
@@ -50,7 +50,7 @@ class StepReport:
 
 
 def pace(meter: Meter, expected: np.ndarray, later: int, cheap: np.ndarray) -> bool:
-    """The pacing rule of the baselines (Sec. VII-A): a question may run a step
+    """The pacing rule of the baselines: a question may run a step
     of expected cost ``expected`` only if the remaining budget then still
     covers the cheapest feasible call, of expected cost ``cheap``, for each of
     the ``later`` questions; otherwise it is downgraded to that call."""
@@ -119,7 +119,7 @@ def run_workflow(ctx: ExecutionContext, rec, wf: Workflow) -> StepReport:
         rec.n_stages += 1
         report.stages += 1
         if ctx.model is not None:
-            # Eq. 5 compares realised costs with the uncorrected predictions,
+            # the cost ratio kappa compares realised costs with the uncorrected predictions,
             # for every stage that completes, SQL included
             ctx.model.observe_cost(rec.db, stage, raw_mu, out.cost, completed=not cut)
         if cut:
@@ -137,7 +137,7 @@ def run_workflow(ctx: ExecutionContext, rec, wf: Workflow) -> StepReport:
         keep = True
         if stage.kind in REPLACING and rec.state.has_answer:
             if ctx.select and resolved is not None:
-                keep = bool(resolved.keep_new[j])          # Select (Sec. IV-B)
+                keep = bool(resolved.keep_new[j])
         if stage.kind in ANSWER_PRODUCING and (keep or not rec.state.has_answer):
             rec.held_correct = bool(out.answer_correct)
         if resolved is not None:

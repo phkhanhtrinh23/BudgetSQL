@@ -131,7 +131,7 @@ class AgentDryRuns(Method):
 
 @dataclass
 class ProfiledPerRequest(VineLMStyle):
-    """Fig. 9's first arm: the world model and the allocation replaced by
+    """The ablation arm with the world model and the allocation replaced by
     per-request planning on profiled averages.  Each request gets its own
     share of the budget, opens with the composition (any that begins with a
     single call) whose profiled accuracy is highest among those that fit, and,

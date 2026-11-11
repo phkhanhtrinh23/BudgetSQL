@@ -70,7 +70,7 @@ class ChatClient:
                 if exc.code in (400, 401, 403, 404):
                     break
                 time.sleep(2 * (attempt + 1))
-            except Exception as exc:                      # network, timeout
+            except Exception as exc:
                 last = str(exc)[:200]
                 time.sleep(2 * (attempt + 1))
         return {"text": "", "texts": [], "prompt_tokens": 0, "completion_tokens": 0,

@@ -26,8 +26,8 @@ VERIFY_OBS: tuple[str, ...] = ("accept", "doubt")
 #: the held answer.
 REPLACE_OBS: tuple[str, ...] = ("valid.match", "valid.diff", "empty", "error")
 
-OBSERVE_ONLY = ("execute", "verify")       # must not change expected correctness
-REPLACING = ("repair", "escalate")         # may replace the held answer
+OBSERVE_ONLY = ("execute", "verify")
+REPLACING = ("repair", "escalate")
 ANSWER_PRODUCING = ("generate",) + REPLACING
 
 
@@ -131,8 +131,8 @@ class State:
 
     history: tuple[tuple[Stage, str], ...] = ()
     ctx: str = "full"
-    answer_stage: Stage | None = None   # the stage that produced the held answer
-    answer_obs: str | None = None       # its observation
+    answer_stage: Stage | None = None
+    answer_obs: str | None = None
     n_answers: int = 0
     #: history indices of replacing stages whose answer Select rejected
     rejected: tuple[int, ...] = ()
@@ -236,7 +236,7 @@ class Workflow:
     ``stage`` to the sub-workflow that follows it; a missing or ``None`` child
     stops and keeps the answer held at that point."""
 
-    stage: Stage | None = None                     # None is the stop workflow
+    stage: Stage | None = None
     children: Mapping[str, "Workflow | None"] = field(default_factory=dict)
     name: str = ""
 

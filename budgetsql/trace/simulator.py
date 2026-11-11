@@ -41,7 +41,7 @@ class SimulatorParams:
     sample_corr: dict[str, float] = field(default_factory=lambda: {"S": 0.85, "M": 0.88, "L": 0.88})
     malformed_cut: dict[str, float] = field(default_factory=lambda: {"S": 1.3, "M": 1.5, "L": 1.6})
     latency: dict[str, float] = field(default_factory=lambda: {"S": 1.69, "M": 1.54, "L": 1.42})
-    repair_cut: float = 1.20          # a repair rarely errors again
+    repair_cut: float = 1.20
     escalate_cut: float = 0.25
     verify_accept_if_correct: float = 0.78
     verify_accept_if_wrong: float = 0.40
@@ -206,7 +206,7 @@ class SimulatedTrace:
         rng = np.random.default_rng(path_seed % (2**32))
         prompt = float(meta.prompt_at(state.ctx if stage.kind != "generate" else stage.ctx))
         if stage.kind == "repair":
-            prompt = prompt * 0.35 + 130.0     # the error text and a truncated preview
+            prompt = prompt * 0.35 + 130.0
         elif stage.kind == "verify":
             prompt = prompt * 0.45 + 90.0
         mean = self.p.completion_tokens if stage.kind != "verify" else 24.0
@@ -328,7 +328,7 @@ def _majority(ids: list[int]) -> int:
     for i in ids:
         counts[i] = counts.get(i, 0) + 1
     best = max(counts.values())
-    for i in ids:                      # ties go to the first sample
+    for i in ids:
         if counts[i] == best:
             return i
     return ids[0]

@@ -7,6 +7,7 @@ name = "budgetsql"
 version = "0.1.0"
 description = "Budget-constrained agentic planning for multi-stage Text-to-SQL"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
 dependencies = [
   "numpy>=1.24",
   "scipy>=1.11",

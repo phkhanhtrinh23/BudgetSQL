@@ -69,3 +69,7 @@ budgetsql/
 ```bash
 pytest -q
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

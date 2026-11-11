@@ -86,7 +86,7 @@ class PlanningAgent:
             self.log.append(f"probe {probe.cid} -> {res.ok}")
         out = tools.allocate(self.reserve)
         self.log.append(f"allocate -> {out}")
-        return None          # no model call: the turn is charged its worst case
+        return None
 
     @staticmethod
     def _priority(cell: DigestCell) -> float:
@@ -116,7 +116,7 @@ class PlanningAgent:
 # the chat agent
 # --------------------------------------------------------------------------- #
 def chat_agent_from_env(probe: bool = True) -> "ChatAgent":
-    """The paper's agent: the model named by ``BUDGETSQL_MODEL_AGENT`` (GPT-5,
+    """The language-model agent: the model named by ``BUDGETSQL_MODEL_AGENT`` (GPT-5,
     minimal reasoning effort, by default) behind the same tools."""
     from ..executors.llm import tiers_from_env
     allowed = ("compose", "imagine", "allocate", "run") + (("probe",) if probe else ())
@@ -127,7 +127,7 @@ def chat_agent_from_env(probe: bool = True) -> "ChatAgent":
 class ChatAgent:
     """Hands the digest and the tools to a language model."""
 
-    client: object                      # anything with .chat(messages, **kw)
+    client: object
     max_calls_per_turn: int = 8
     temperature: float = 0.0
     #: The turn's limits, set from ``PlannerConfig`` by ``configure``: its

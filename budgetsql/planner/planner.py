@@ -10,7 +10,7 @@ certificate.  One meter charges every call, the agent's own included.
 The agent is central to the batch rather than to a group: one digest covers
 every group and its turns are charged to the groups in proportion to their
 questions.  :class:`budgetsql.planner.batch.BatchPlanner` drives the groups'
-planners through Alg. 1 and holds the agent's sessions.
+planners and holds the agent's sessions.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ from .execute import ExecutionContext, first_block, pace, run_workflow
 from .meter import Meter
 
 #: The compositions the opening solve chooses a first stage from: those that
-#: begin with a single call (Sec. IV-C).
+#: begin with a single call.
 OPENING_CANDIDATES = tuple(n for n, wf in reference_library().items()
                            if n in LIBRARY_ORDER and single_call_first(wf))
 
@@ -62,8 +62,8 @@ class QuestionRecord:
     predicted: np.ndarray = field(default_factory=zeros)
     n_stages: int = 0
     cell: str = ""
-    opening: Workflow | None = None     # the composition its first stage came from
-    planned: Workflow | None = None     # what the last allocation chose for it
+    opening: Workflow | None = None
+    planned: Workflow | None = None
     #: candidates the agent registered for the cell the question was in when
     #: it registered them; cells are re-formed after every block, so the
     #: candidates stay with the question
@@ -73,7 +73,7 @@ class QuestionRecord:
     edited: bool = False
     #: the stacked value p-tilde of the last continuation it ran, when chosen
     selected_value: float | None = None
-    blocked: set[str] = field(default_factory=set)   # candidates the meter refused
+    blocked: set[str] = field(default_factory=set)
     #: Observations of the stages run since the question joined a digest cell:
     #: (stage id, predicted distribution, index observed).
     obs_log: list[tuple[str, np.ndarray, int]] = field(default_factory=list)
@@ -175,8 +175,8 @@ class BudgetSQL:
 
     def start(self, metas: list[QuestionMeta], budget: np.ndarray,
               meter: Meter | None = None) -> None:
-        """Alg. 1, line 2: solve Eq. 6 from h0, run the planned first stages and
-        observe them."""
+        """Solve the allocation program from h0, run the planned first stages
+        and observe them."""
         self._t0 = time.time()
         cfg = self.cfg
         self.meter = meter or Meter(budget, planning_cap=cfg.planning_cap)
@@ -194,7 +194,7 @@ class BudgetSQL:
             self._recalibrate()
 
     def resolve(self) -> Allocation | None:
-        """Re-solve Eq. 6 over the open questions (Alg. 1, line 7)."""
+        """Re-solve the allocation program over the open questions."""
         alloc = self._solve_continuations()
         self._last_alloc = alloc
         return alloc
@@ -354,7 +354,7 @@ class BudgetSQL:
             rec.closed = True
 
     def _recalibrate(self) -> None:
-        """Within-batch recalibration (Sec. VI): each database's share of
+        """Within-batch recalibration: each database's share of
         correct answers is read off its observed execution rates, and the held
         answers are rescored."""
         by_db: dict[str, list[QuestionRecord]] = {}
@@ -405,7 +405,7 @@ class BudgetSQL:
         """W_i: what a question may run next.  The rest of the composition its
         first stage came from, the candidates the agent registered for its cell,
         and, once its cell has been flagged, the one-stage edits of those
-        candidates (Sec. IV-C).  Stop is always added by the caller."""
+        candidates.  Stop is always added by the caller."""
         base: dict[str, Workflow] = {}
         rest = remainder(rec.opening, rec.state)
         if not rest.is_stop and self.grammar.is_wellformed(rest, rec.state):
@@ -467,7 +467,7 @@ class BudgetSQL:
         res = reserve if reserve is not None else self._planning_reserve()
         alloc = self._solve(cands, reserve=res)
         if self.cfg.cost_reserve:
-            # Eq. 8 over the block planned before the next re-solve
+            # the Bernstein reserve over the block planned before the next re-solve
             rho = reserve_mod.reserve_for(alloc, self.cfg.replan_block, alloc.duals,
                                           delta=self.cfg.reserve_delta,
                                           z=self.cfg.reserve_z)
@@ -636,7 +636,7 @@ class BudgetSQL:
     # the certificate
     # ------------------------------------------------------------------ #
     def certificate(self, need: float | None = None) -> Certificate:
-        """Eq. 7 for this group at the duals of its last solve, with the price
+        """The certificate for this group at the duals of its last solve, with the price
         of its share of one turn.  ``need`` stops the search once Psi exceeds
         it, since the test only compares."""
         alloc = self._last_alloc

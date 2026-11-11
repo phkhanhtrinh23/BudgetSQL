@@ -36,11 +36,11 @@ class Candidate:
 
 @dataclass
 class Allocation:
-    x: np.ndarray                      # mass on each candidate
+    x: np.ndarray
     value: float
     spend: np.ndarray
-    duals: np.ndarray                  # lambda, one price per dimension
-    omega: np.ndarray                  # one price per question
+    duals: np.ndarray
+    omega: np.ndarray
     qids: list[str]
     candidates: list[Candidate]
     status: str = "optimal"
@@ -154,7 +154,7 @@ def greedy(candidates: list[Candidate], budget: np.ndarray,
     qids = sorted(by_q)
 
     lam = np.zeros(D) if duals is None else np.asarray(duals, dtype=float).copy()
-    if not lam.any():                                   # price each dimension by its share
+    if not lam.any():
         b = np.asarray(budget, dtype=float)
         lam = np.where(b > 0, 1.0 / np.maximum(b, 1e-12), 0.0)
 

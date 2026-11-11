@@ -5,7 +5,7 @@ from .fixed import (BestFixedMixture, BestFixedWorkflow, Oracle,
                     OmniRouterStyle)
 from .profiles import Profile, profile_continuations, profile_library
 
-#: The methods reported side by side with the planner.
+#: The baseline methods.
 BASELINES = {
     "best_fixed_mixture": BestFixedMixture,
     "best_fixed_workflow": BestFixedWorkflow,

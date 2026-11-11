@@ -1,4 +1,4 @@
-"""The agent's turns as modelled effects (Sec. VII-A).
+"""The agent's turns as modelled effects in the replay.
 
 In the replay, the agent's turns are charged to the budget (the certificate
 decides when a turn is taken; ``PlannerConfig.agent_mode = "modelled"``) but
@@ -14,7 +14,7 @@ paired difference between runs whose turns are taken (``agent_mode =
 probing and re-planning one at a time; ``ModelledEffects.load`` reads effects
 measured elsewhere.  The agent is the workbench's (``Workbench.agent_factory``:
 the language-model agent with ``--chat-agent``), else the rule-based
-``PlanningAgent``, whose effects only stand in for the paper's agent.
+``PlanningAgent``, a rule-based stand-in for the language-model agent.
 """
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ COMPONENTS = ("composition", "probing", "replanning")
 
 @dataclass
 class Effect:
-    mean: float = 0.0       # accuracy points
-    var: float = 0.0        # points squared
+    mean: float = 0.0
+    var: float = 0.0
 
     def as_dict(self) -> dict:
         return {"mean": self.mean, "var": self.var}

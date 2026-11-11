@@ -65,11 +65,11 @@ class StagePrediction:
                                  s_old, s_old)
         f = np.clip(self.fix if self.fix is not None else np.zeros_like(p), 0.0, 1.0)
         r = np.clip(self.reg if self.reg is not None else np.zeros_like(p), 0.0, 1.0)
-        f = np.minimum(f, 1.0 - s_old)          # a fix needs a wrong held answer
-        r = np.minimum(r, s_old)                # a regression needs a right one
-        keep_new = f > r                        # Select
+        f = np.minimum(f, 1.0 - s_old)
+        r = np.minimum(r, s_old)
+        keep_new = f > r
         s_kept = np.clip(s_old + f - r, 0.0, 1.0)
-        s_after = np.where(keep_new, s_kept, s_old)     # = s_old + (f - r)^+, Eq. 4
+        s_after = np.where(keep_new, s_kept, s_old)
         return ResolvedStage(self.labels, p, s_after, f, r, keep_new, s_kept, s_old)
 
 
@@ -80,9 +80,9 @@ class ResolvedStage:
     s_after: np.ndarray
     fix: np.ndarray
     reg: np.ndarray
-    keep_new: np.ndarray            # Select's decision per observation
-    s_kept: np.ndarray = None       # correctness held if the new answer is kept
-    s_rejected: np.ndarray = None   # ... and if it is rejected
+    keep_new: np.ndarray
+    s_kept: np.ndarray = None
+    s_rejected: np.ndarray = None
 
     def index(self, obs: str) -> int:
         return self.labels.index(obs)
@@ -228,7 +228,7 @@ class StageWorldModel:
         out.heads = self.heads
         out.train_dbs = self.train_dbs
         out._imputed = self._imputed
-        out._cache = self._cache          # predictions are pre-correction
+        out._cache = self._cache
         return out
 
     # ------------------------------------------------------------------ #
@@ -244,7 +244,8 @@ class StageWorldModel:
 
     def predict_raw(self, meta: QuestionMeta, state: State, stage: Stage) -> StagePrediction:
         """The heads' prediction before this batch's online corrections: the
-        uncorrected mu-hat that Eq. 5 compares realised costs against."""
+        uncorrected mu-hat that the cost ratio kappa compares realised costs
+        against."""
         key = _cache_key(meta, state, stage)
         got = self._cache.get(key)
         if got is None:
@@ -265,7 +266,7 @@ class StageWorldModel:
             stage0 = group[0][3]
             labels = stage0.observations()
             n = len(group)
-            if heads is None:                      # a stage type the corpus never ran
+            if heads is None:
                 flat = np.full((n, len(labels)), 1.0 / len(labels))
                 for i, (key, meta, state, stage) in enumerate(group):
                     self._cache[key] = StagePrediction(
@@ -342,7 +343,7 @@ class StageWorldModel:
         if not items:
             return 0.0
         s_now = float(np.mean(self.s_of_many(items)))
-        shift = _shift_to(s_now, target)        # measured under the current shift
+        shift = _shift_to(s_now, target)
         self._logit_shift[db] = self._logit_shift.get(db, 0.0) + shift
         self._cache.clear()
         return self._logit_shift[db]
@@ -481,7 +482,7 @@ class StageWorldModel:
 
     def _worst_case(self, meta: QuestionMeta, state: State, stage: Stage) -> np.ndarray:
         """The meter's worst case for one stage at the workload's limits, the
-        range c-bar that the Bernstein reserve of Eq. 8 reads."""
+        range c-bar that the Bernstein reserve reads."""
         ctx = stage.ctx if stage.kind == "generate" else state.ctx
         return stage_worst_case(stage, float(meta.prompt_at(ctx)), self.cfg.limits)
 
@@ -494,7 +495,7 @@ class StageWorldModel:
         censored: what they were charged is not the cost of a completed call.
 
         ``predicted`` must be the heads' own prediction mu-hat, before any
-        correction (``predict_raw``): kappa of Eq. 5 is the ratio of realised
+        correction (``predict_raw``): kappa is the ratio of realised
         to uncorrected predicted cost, and feeding it corrected predictions
         would make it converge to the square root of the true ratio."""
         if not completed or not self.cfg.online_cost_updates:

@@ -213,7 +213,6 @@ class StackedValues:
             for m, s, w in zip(metas, states, wfs)])
 
 
-
     def values(self, metas: list[QuestionMeta], states: list[State],
                wfs: list[Workflow], rolls: list, s_held: list[float]) -> np.ndarray:
         """Stacked value of each candidate: stop keeps the held answer's
@@ -270,8 +269,8 @@ class StackedValues:
         direct head reads a whole workflow, and ``bonus`` bounds its share by
         its largest value over every workflow description the grammar allows
         from the state (``descriptor_box``).  A Psi computed from this bound is
-        at least Eq. 7's, so a failed test still proves that no turn can pay
-        (Prop. 2(i)).  A continuation whose clipped value falls to zero is
+        at least the exact one, so a failed test still proves that no turn
+        can pay.  A continuation whose clipped value falls to zero is
         dominated by stop, which keeps the bound valid."""
         grammar = grammar or Grammar()
         held = np.asarray(s_held, dtype=float)
@@ -393,7 +392,7 @@ class CrossFitStacker:
                 inner_head = DirectHead().fit(X[~test], y[~test])
                 d_candidate[test] = inner_head.predict(X[test])
                 d_held[test] = inner_head.predict(S[test])
-            direct.fit(X, y)                    # the head the planner reads
+            direct.fit(X, y)
             is_stop = np.array([r.is_stop for r in rows], dtype=bool)
             is_open = np.array([r.is_open for r in rows], dtype=bool)
             rolled = np.array([r.rolled for r in rows])
@@ -526,4 +525,4 @@ class _Row:
     realised: float
     stop_value: float
     is_stop: bool
-    is_open: bool = False      # a whole composition from the empty state
+    is_open: bool = False

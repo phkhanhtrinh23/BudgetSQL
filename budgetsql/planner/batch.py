@@ -1,4 +1,4 @@
-"""Planning and executing a batch (Alg. 1).
+"""Planning and executing a batch.
 
 A deployment may split its batch and budget into budget groups, each planned by
 its own allocation program (:class:`~budgetsql.planner.planner.BudgetSQL`), while
@@ -6,20 +6,21 @@ the digest and the agent's sessions stay central: the agent reads one digest
 for the whole batch, and each of its turns is charged to the groups in
 proportion to their questions.
 
-    1: U <- 0                       the meter reserves and charges every call
-    2: solve Eq. 6 from h0; run the planned first stages; observe h_i
-    3: agent: compose, imagine, allocate with r = rho_turn      (opening session)
-    4: while some question has a planned continuation do
-    5:     run(K) under the meter
-    6:     update U, the states, the answers and kappa (Eq. 5)
-    7:     re-solve Eq. 6 at B - U - r - rho
-    8:     if some digest cell is flagged then
-    9:         while Psi > lambda' rho_turn and turns are left do     (Eq. 7)
-   10:             agent turn: add candidates, probe, allocate
+    U <- 0                       the meter reserves and charges every call
+    solve the allocation program from h0; run the planned first stages;
+        observe h_i
+    agent: compose, imagine, allocate with r = rho_turn   (opening session)
+    while some question has a planned continuation do
+        run(K) under the meter
+        update U, the states, the answers and the cost ratio kappa
+        re-solve the program at B - U - r - rho
+        if some digest cell is flagged then
+            while Psi > lambda' rho_turn and turns are left do  (certificate)
+                agent turn: add candidates, probe, allocate
 
 How a turn enters a run is ``PlannerConfig.agent_mode``.  In ``"live"`` mode
-the agent's tool calls run.  In ``"modelled"`` mode, the replay protocol of
-Sec. VII-A, the same certificate decides when a turn is taken and the turn is
+the agent's tool calls run.  In ``"modelled"`` mode, the replay protocol, the
+same certificate decides when a turn is taken and the turn is
 charged to the budget, but its tool calls are not made: the accuracy they add
 enters the evaluation as a modelled effect (``budgetsql.eval.effects``).
 """
@@ -48,7 +49,7 @@ class BatchPlanner:
         for p in self.planners:
             p.batch = self
         if agent is not None and hasattr(agent, "configure"):
-            agent.configure(self.cfg)      # the turn's limits give rho_turn
+            agent.configure(self.cfg)
 
     # ------------------------------------------------------------------ #
     @property
@@ -84,14 +85,14 @@ class BatchPlanner:
         self.turn_log = []
 
         for p, (metas, budget, meter) in zip(self.planners, groups):
-            p.start(metas, budget, meter)                               # line 2
+            p.start(metas, budget, meter)
         if self.cfg.plan_whole_workflows:
             return self._finish()
 
         if self.uses_agent:
             for p in self.planners:
                 p.resolve()
-            self._session(opening=True)                                # line 3
+            self._session(opening=True)
 
         if not self.cfg.periodic_resolves:
             # the opening plan and one solve after the opening session, run
@@ -101,21 +102,21 @@ class BatchPlanner:
                     p.run_next_block(whole_plan=True)
             return self._finish()
 
-        while True:                                                     # line 4
+        while True:
             ran = False
             for p in self.planners:
-                if p.resolve() is not None and p.run_next_block():     # lines 5-7
+                if p.resolve() is not None and p.run_next_block():
                     ran = True
             if not ran:
                 break
             flagged = self.flagged() if self.uses_agent else []
-            if flagged:                                                 # line 8
+            if flagged:
                 # the tool re-solves with the one-stage edits of the flagged
                 # cells' candidates, then the certificate is tested
                 for p in self.planners:
                     p.add_edits(flagged)
                     p.resolve()
-                self._session()                                         # lines 9-10
+                self._session()
         return self._finish()
 
     def _finish(self) -> list[RunResult]:
@@ -171,10 +172,10 @@ class BatchPlanner:
     # sessions
     # ------------------------------------------------------------------ #
     def _session(self, opening: bool = False) -> None:
-        from .tools import ToolBox   # imported here: the tools bind to a batch
+        from .tools import ToolBox
 
         if self.sessions >= self.cfg.max_sessions or not self.agent_available():
-            return                       # no session is left to request
+            return
         self.sessions += 1
         self.session_turns = 0
         box = ToolBox(self)
@@ -196,7 +197,7 @@ class BatchPlanner:
         reservations = []
         for p in self.planners:
             if self.cfg.free_turns:
-                break                     # neither reserved nor charged
+                break
             r = p.meter.reserve_planning(p.turn_charge(), label="agent turn")
             if r is None:
                 for q, rr in reservations:
@@ -221,7 +222,7 @@ class BatchPlanner:
             cost = np.asarray(self.cfg.modelled_turn_cost, dtype=float)
         wc = self.turn_worst_case()
         reported = wc if cost is None else np.asarray(cost, dtype=float)
-        # the turn's limits bound it by rho_turn (Prop. 1); a provider that
+        # the turn's limits bound it by rho_turn; a provider that
         # reports more than that is logged, as a breach of the reservation
         exceeded = bool(np.any(reported > wc + 1e-12))
         cost = np.minimum(reported, wc)

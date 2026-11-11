@@ -10,7 +10,7 @@ import math
 import random
 from fractions import Fraction as F
 
-Trace = list[tuple[F, int, int, F]]     # weight, keep correct, escalate correct, rule
+Trace = list[tuple[F, int, int, F]]
 
 
 def random_trace(n: int = 12, rng: random.Random | None = None) -> Trace:

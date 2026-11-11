@@ -66,18 +66,18 @@ class Workbench:
     cache_dir: Path | None = None
     library: dict = field(default_factory=reference_library)
     inner_folds: int = 4
-    #: The agent's modelled effects per budget vector (Sec. VII-A); none
+    #: The agent's modelled effects per budget vector; none
     #: leaves BudgetSQL at its replayed accuracy.
     effects: ModelledEffects = field(default_factory=ModelledEffects)
     #: Builds the agent whose turns are taken in live mode, for BudgetSQL and
     #: for the agent baselines alike; called with ``probe`` (may it probe).
     #: ``None`` uses the rule-based stand-ins (``PlanningAgent`` for BudgetSQL,
     #: ``BudgetTrackerAgent`` for the baselines); ``chat_agent_from_env`` is the
-    #: language-model agent of the paper.
+    #: language-model agent.
     agent_factory: object = None
 
     def __post_init__(self) -> None:
-        use_workload_prices(self.workload)      # e.g. GPT-5 as Spider's large tier
+        use_workload_prices(self.workload)
         self._values: dict[str, StackedValues] = {}
         self._methods: dict[tuple[str, str], object] = {}
         if self.cache_dir is not None:
@@ -273,7 +273,7 @@ class Workbench:
                     method = self.method(name, group, cfg).with_cfg(cfg)
                     model = getattr(method, "model", None)
                     if model is not None:
-                        model.reset_online()   # a cached fit starts each run fresh
+                        model.reset_online()
                     results.append(method.run(metas, b, Meter(b)))
             correct: dict[str, bool] = {}
             for group, res in zip(groups, results):

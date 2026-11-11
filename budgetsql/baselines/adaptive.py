@@ -85,7 +85,7 @@ class CascadeRouting(Method):
                 meter, rec, opener, self.profiles[tier].cost, left))
             if rec.closed or rec.state.answer_stage is None \
                     or rec.state.answer_stage.tier != tier:
-                continue                     # downgraded or never answered
+                continue
             obs = rec.state.answer_obs or "-"
             spent = np.zeros_like(per_q)
             # escalate while the estimated gain per normalised cost exceeds a

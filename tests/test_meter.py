@@ -10,7 +10,7 @@ def test_reservation_blocks_an_overrun():
     m = Meter(vec(1e-3, 1000, 10))
     r = m.reserve(vec(9e-4, 900, 9))
     assert r is not None
-    assert m.reserve(vec(9e-4, 900, 9)) is None      # no room while in flight
+    assert m.reserve(vec(9e-4, 900, 9)) is None
     m.settle(r, vec(1e-4, 100, 1))
     assert m.reserve(vec(5e-4, 500, 5)) is not None
 

@@ -79,37 +79,37 @@ class PlannerConfig:
     uses when nothing is overridden."""
 
     # world model
-    min_support: int = 30          # (a, o) pairs below this back off to the pooled frequency
-    prior_calls: float = 20.0      # pseudo-calls nu of the online cost correction
+    min_support: int = 30
+    prior_calls: float = 20.0
     n_estimators: int = 150
     num_leaves: int = 15
     learning_rate: float = 0.05
-    log_scale_costs: bool = False  # ablation: regress log cost and exponentiate
+    log_scale_costs: bool = False
 
     # allocation / adaptation
-    replan_block: int = 25         # K continuations between re-solves
+    replan_block: int = 25
     #: Relative cost drift, and shift of observation shares, that flags a
     #: digest cell.
     drift_threshold: float = 0.15
-    #: Hold the cost reserve rho of Eq. 8 back from the program's right-hand
-    #: side.  Off in the replay of Sec. VII-A, where rho = 0 and the meter
+    #: Hold the Bernstein cost reserve rho back from the program's right-hand
+    #: side.  Off in the replay, where rho = 0 and the meter
     #: alone enforces the budget; the ablation "with a cost reserve" turns it on.
     cost_reserve: bool = False
-    #: Miss probability of the Bernstein reserve (the log(d/delta) variant of
-    #: Prop. 3).  Left unset, the reserve follows the newsvendor condition at
+    #: Miss probability of the Bernstein reserve (the log(d/delta) variant).
+    #: Left unset, the reserve follows the newsvendor condition at
     #: the block's own gain per priced unit.
     reserve_delta: float | None = None
     #: A reserve of ``reserve_z`` predicted standard deviations instead of the
     #: Bernstein bound (the ablation uses one standard deviation).
     reserve_z: float | None = None
-    use_allocation_lp: bool = True # ablation: greedy ranking instead of the LP
+    use_allocation_lp: bool = True
     #: Re-solve every K continuations.  Off, the continuation program is solved
     #: once after the opening session and its whole plan is run.
     periodic_resolves: bool = True
-    priced_dims: tuple[str, ...] = DIMS  # ablation: ("usd",) prices money alone
+    priced_dims: tuple[str, ...] = DIMS
 
     # agent
-    max_digest_cells: int = 40     # G_max
+    max_digest_cells: int = 40
     digest_tokens: int = 1400
     latent_tokens: int = 64
     #: Completion cap and timeout of one agent turn: with the digest they give
@@ -121,12 +121,12 @@ class PlannerConfig:
     agent_result_tokens: int = 200
     turns_per_session: int = 6
     max_sessions: int = 11
-    planning_cap: float = 0.10     # share of the money budget planning may take
-    max_candidates: int = 8        # W_max per question
+    planning_cap: float = 0.10
+    max_candidates: int = 8
     probe_questions: int = 8
     use_agent: bool = True
-    #: How the agent's turns enter a run.  ``"modelled"`` is the replay of
-    #: Sec. VII-A: the certificate decides when a turn would be taken, the turn
+    #: How the agent's turns enter a run.  ``"modelled"`` is the replay
+    #: protocol: the certificate decides when a turn would be taken, the turn
     #: is charged to the budget, and its accuracy effect enters the evaluation
     #: as a modelled, additive per-vector effect (``eval.effects``).
     #: ``"live"`` runs the agent's tool calls and charges what the turn cost.
@@ -141,7 +141,7 @@ class PlannerConfig:
     #: budget could not cover the later questions (the baselines' pacing rule).
     pacing: bool = False
     #: Depth of the certificate's search over the grammar; ``None`` searches
-    #: every composition the grammar admits from a state, as Eq. 7 states.
+    #: every composition the grammar admits from a state.
     certificate_depth: int | None = None
     #: Score continuations from the question alone, ignoring what the first
     #: stage actually returned.
@@ -155,13 +155,13 @@ class PlannerConfig:
     use_differential_features: bool = True
     use_rollouts: bool = True
     use_stacking: bool = True
-    #: Select (Sec. IV-B): keep a replacing stage's new answer iff f-hat > r-hat.
+    #: Select: keep a replacing stage's new answer iff f-hat > r-hat.
     #: Off, a new answer is always kept (the planners without a world model).
     use_select: bool = True
-    #: Online cost updates of Eq. 5.  Off in the replay until Sec. VII-D.
+    #: Online cost updates (the cost ratio kappa).  Off in the replay.
     online_cost_updates: bool = False
     #: Within-batch recalibration of the success heads from observed execution
-    #: rates (Sec. VI), part of the online updates of Sec. VII-D.
+    #: rates, part of the online updates.
     recalibrate_success: bool = False
 
     limits: ExecutorLimits = field(default_factory=ExecutorLimits)
@@ -187,11 +187,11 @@ class PlannerConfig:
 #: reference workflow's mean cost in it; every other dimension gets several
 #: times that, so it does not bind.
 BUDGETS: dict[str, np.ndarray] = {
-    "V1": vec(0.8e-3, 6000, 8.0),   # money
-    "V2": vec(1.0e-3, 6000, 2.0),   # money + service time
-    "V3": vec(1.0e-3, 1300, 8.0),   # money + tokens
-    "V4": vec(0.8e-3, 1500, 2.2),   # all three
-    "SP": vec(11.0e-3, 10500, 81.0),  # Spider 2.0-Lite
+    "V1": vec(0.8e-3, 6000, 8.0),
+    "V2": vec(1.0e-3, 6000, 2.0),
+    "V3": vec(1.0e-3, 1300, 8.0),
+    "V4": vec(0.8e-3, 1500, 2.2),
+    "SP": vec(11.0e-3, 10500, 81.0),
 }
 
 #: The workflow whose mean cost the budget vectors are set against.
@@ -201,7 +201,7 @@ REFERENCE_WORKFLOW = "M+R_L"
 @dataclass(frozen=True)
 class Workload:
     name: str
-    budget_groups: str = "db"   # "db" or "fold"
+    budget_groups: str = "db"
     folds: int = 1
     runs: int = 5
     budgets: tuple[str, ...] = ("V1", "V2", "V3", "V4")
@@ -260,7 +260,7 @@ GRID_AXES: dict[str, tuple[float, ...]] = {
 #: The slack a dimension the grid does not vary receives.
 GRID_SLACK: dict[str, float] = {"usd": 4.0e-3, "tok": 20000.0, "sec": 40.0}
 
-#: Money per question of the money sweep (Fig. 3(a)), tokens and time slack.
+#: Money per question of the money sweep, tokens and time slack.
 SWEEP_MONEY: tuple[float, ...] = (0.3e-3, 0.5e-3, 0.8e-3, 1.2e-3, 2.0e-3)
 
 

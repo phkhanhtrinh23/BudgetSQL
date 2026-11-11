@@ -5,7 +5,7 @@ outcomes, so their runs are paired.  A comparison's gain on a unit (a database,
 or a fold of databases) is the mean over the paired runs of the difference in
 accuracy on that unit, and the mean lead weights units by their questions.  A
 lead's standard error adds the bootstrap variance over units and the variance
-of the modelled effects (Sec. VII-A), and its interval uses Student's t on the
+of the modelled effects, and its interval uses Student's t on the
 units.  A contrast between two arms of the same method (ablation, online) uses
 the paired standard error, plus the effects' variance when only one arm
 carries them.

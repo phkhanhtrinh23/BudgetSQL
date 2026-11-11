@@ -1,7 +1,8 @@
 """What a stage can cost at most under its limits.
 
 Shared by the meter, which reserves this worst case before launching a call,
-and by the world model, whose rollouts report it as the range c-bar of Eq. 8.
+and by the world model, whose rollouts report it as the range c-bar of the
+Bernstein cost reserve.
 """
 from __future__ import annotations
 

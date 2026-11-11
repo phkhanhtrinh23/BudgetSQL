@@ -129,7 +129,7 @@ class ToolBox:
 
     # ---- allocate ----
     def allocate(self, reserve: float = 0.0) -> ToolResult:
-        """Solve Eq. 6 in every group with the planning reserve r = rho_turn
+        """Solve the allocation program in every group with the planning reserve r = rho_turn
         held back while the agent can still be called, plus ``reserve`` (a
         share of the money) if the agent asks."""
         value, n = 0.0, 0

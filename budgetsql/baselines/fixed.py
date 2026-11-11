@@ -33,7 +33,7 @@ def mixture_lp(names: list[str], profiles: dict[str, Profile],
                per_question_budget: np.ndarray) -> dict[str, float]:
     """The best feasible random mixture of workflows, as shares that sum to one."""
     acc = np.array([profiles[n].acc for n in names])
-    cost = np.stack([profiles[n].cost for n in names], axis=1)      # d x m
+    cost = np.stack([profiles[n].cost for n in names], axis=1)
     res = linprog(-acc, A_ub=cost, b_ub=np.asarray(per_question_budget, dtype=float),
                   A_eq=np.ones((1, len(names))), b_eq=[1.0], bounds=(0.0, None),
                   method="highs-ds")

@@ -40,8 +40,7 @@ def run_order(alloc: Allocation, tol: float = 1e-7) -> list[Candidate]:
     priced unit, those with no priced cost first, in decreasing order of gain.
 
     The extreme point splits at most d questions between candidates, and a
-    split question stops at this solve, keeping its held answer (Sec. IV-C,
-    Prop. 3): only questions whose whole mass is on one continuation run."""
+    split question stops at this solve, keeping its held answer: only questions whose whole mass is on one continuation run."""
     stop = {c.qid: c.value for c in alloc.candidates if c.is_stop}
     split = set(alloc.split_questions(tol))
     free, priced = [], []
@@ -66,11 +65,11 @@ def bernstein_reserve(variances: np.ndarray, ranges: np.ndarray,
 
 def reserve_for(alloc: Allocation, block: int, duals: np.ndarray,
                 delta: float | None = None, z: float | None = None) -> np.ndarray:
-    """The reserve rho of Eq. 8 for the next block of continuations.
+    """The Bernstein reserve rho for the next block of continuations.
 
     Per dimension, the variances of the block's continuations are summed and
     c-bar is the meter's worst case for one continuation.  With ``delta``
-    given, the log term is ``log(d/delta)`` (Prop. 3's variant); with ``z`` the
+    given, the log term is ``log(d/delta)``; with ``z`` the
     reserve is that many predicted standard deviations; otherwise the log term
     is ``log theta`` at the block's smallest gain per priced unit (the
     newsvendor condition).  rho_k = 0 where lambda_k = 0.
@@ -90,5 +89,5 @@ def reserve_for(alloc: Allocation, block: int, duals: np.ndarray,
                     else math.log(max(1.0, theta(alloc, block=block))))
         rho = bernstein_reserve(var, rng, log_term)
     duals = np.asarray(duals, dtype=float)
-    rho = np.where(duals > 0, rho, 0.0)     # held only in priced dimensions
+    rho = np.where(duals > 0, rho, 0.0)
     return rho

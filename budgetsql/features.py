@@ -22,7 +22,7 @@ class QuestionMeta:
     n_evidence_tokens: int = 0
     n_schema_tokens: int = 0
     n_tables: int = 0
-    prompt_tokens: dict[str, int] = field(default_factory=dict)  # per context level
+    prompt_tokens: dict[str, int] = field(default_factory=dict)
     difficulty: str = ""
 
     def prompt_at(self, level: str) -> int:
@@ -60,9 +60,6 @@ N_FEATURES = len(COLUMNS)
 IDX = {c: i for i, c in enumerate(COLUMNS)}
 QUESTION_SLICE = slice(0, len(QUESTION_COLUMNS))
 HISTORY_SLICE = slice(len(QUESTION_COLUMNS), N_FEATURES)
-
-
-
 
 
 def phi(meta: QuestionMeta, state: State, obs: Observables | None = None,

@@ -1,7 +1,7 @@
 """A common shell for the methods BudgetSQL is compared with.
 
 Every method gets the same stage grammar where its design allows, the same
-executors, the same meter and the same pacing rule (Sec. VII-A): a question is
+executors, the same meter and the same pacing rule: a question is
 downgraded to the cheapest feasible call when the remaining budget could not
 otherwise cover the questions still to come.  For a question that already holds
 an answer, the cheapest feasible step is to keep it.

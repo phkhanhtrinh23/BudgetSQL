@@ -90,7 +90,7 @@ class TraceCorpus:
             if stage.kind in REPLACING and state.has_answer and select is not None:
                 keep = bool(select(state, stage, out))
             elif select is not None and hasattr(select, "observe"):
-                select.observe(state, stage, out)      # Bayes on what it observed
+                select.observe(state, stage, out)
             if stage.kind in ANSWER_PRODUCING and (keep or held is None):
                 held = out.answer_correct
             state = state.append(stage, out.obs, keep=keep, values=out)

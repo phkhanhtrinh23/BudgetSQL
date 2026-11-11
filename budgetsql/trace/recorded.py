@@ -98,7 +98,7 @@ class RecordedTrace:
         got = stages.get(stage.id)
         if got is None:
             return None
-        return StageOutcome.from_json(got.to_json())   # a fresh copy per replay
+        return StageOutcome.from_json(got.to_json())
 
     def coverage(self) -> dict[str, float]:
         n_branch = sum(len(b) for b in self._branches.values())

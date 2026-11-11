@@ -1,4 +1,4 @@
-"""When calling the agent can still pay for itself (Eq. 7).
+"""When calling the agent can still pay for itself: the certificate.
 
 After a re-solve, the dual prices say what a unit of each dimension is worth
 (lambda) and what each open question is already worth (omega).  Scoring every
@@ -9,7 +9,7 @@ most any new candidate could add,
 
 If Psi is at most what a turn would cost at those prices, lambda' rho_turn, no
 turn that only adds candidates can raise the program's value once the turn is
-charged (Prop. 2(i)), so the agent is not called.
+charged, so the agent is not called.
 
 The values are the stacked values p-tilde the program allocates.  The stacks
 are linear in the rollout's success, so ``scale * p-hat - lambda' c-hat`` is
@@ -20,7 +20,7 @@ grammar allows from the state (``StackedValues.bound_forms``).  The search
 expands the tree level by level for many questions at once, so each level costs
 one batch of head evaluations, and it skips an action whose most optimistic
 value --- certain success at its own expected cost --- cannot beat stopping
-where it starts.  Both keep Psi an upper bound of Eq. 7's, so a failed test is
+where it starts.  Both keep Psi an upper bound of the exact Psi, so a failed test is
 still a proof.
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ class Certificate:
     turn_price: float
     call_agent: bool
     per_question: dict[str, float] = field(default_factory=dict)
-    complete: bool = True        # False when the search stopped early
+    complete: bool = True
 
     def as_dict(self) -> dict:
         return {"psi": self.psi, "turn_price": self.turn_price,
@@ -57,7 +57,7 @@ class _Node:
     state: State
     s: float
     depth: int
-    options: list = field(default_factory=list)   # (price, [(p, child)])
+    options: list = field(default_factory=list)
     value: float = 0.0
 
 
@@ -87,7 +87,7 @@ def best_priced_values(model: StageWorldModel, grammar: Grammar,
                 pred = model.predict(items[nd.q][0], nd.state, a)
                 price = float(duals @ pred.mu)
                 if optimistic - price <= stop + 1e-12:
-                    continue        # cannot beat stopping here, whatever follows
+                    continue
                 res = pred.resolve(nd.s)
                 kids = []
                 for j, obs in enumerate(res.labels):
