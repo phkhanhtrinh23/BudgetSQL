@@ -1,13 +1,3 @@
-"""The allocation tool: a linear program over the agent's candidates.
-
-Each open question spends its one unit of mass on the candidates registered for
-it, the budget rows are packing constraints, and the program's dual prices say
-what one unit of each dimension is worth.  The solver returns an extreme point,
-which splits at most as many questions as there are budget dimensions; taking
-the extreme point rather than each question's own maximiser at the optimal
-prices matters, because when many questions tie at those prices, independent
-maximisers can all choose the expensive side and overrun the budget.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -46,8 +36,6 @@ class Allocation:
     status: str = "optimal"
 
     def chosen(self) -> dict[str, Candidate]:
-        """The candidate each question runs.  A split question takes the side
-        with the larger share."""
         best: dict[str, tuple[float, Candidate]] = {}
         for c, xv in zip(self.candidates, self.x):
             cur = best.get(c.qid)
@@ -73,9 +61,6 @@ def solve(candidates: list[Candidate], budget: np.ndarray,
           reserve: np.ndarray | None = None,
           priced_dims: tuple[str, ...] = DIMS,
           time_limit: float | None = None) -> Allocation:
-    """Solve the allocation program.  ``reserve`` is held back from the budget
-    for later planning turns and probes, and ``time_limit`` caps the solver's
-    own time, which a whole-batch program can exhaust."""
     if not candidates:
         return Allocation(np.zeros(0), 0.0, np.zeros(D), np.zeros(D), np.zeros(0), [], [])
 
@@ -110,7 +95,6 @@ def solve(candidates: list[Candidate], budget: np.ndarray,
     res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
                   bounds=(0.0, None), method="highs-ds", options=options)
     if not res.success or res.x is None:
-        # fall back to the cheapest feasible candidate per question
         x = np.zeros(m)
         for q in qids:
             cands = [(j, cd) for j, cd in enumerate(candidates) if cd.qid == q]
@@ -146,8 +130,6 @@ def _spend(candidates: list[Candidate], x: np.ndarray) -> np.ndarray:
 
 def greedy(candidates: list[Candidate], budget: np.ndarray,
            duals: np.ndarray | None = None) -> Allocation:
-    """Run continuations in decreasing order of gain per priced cost until the
-    budget is spent.  Used only when the allocation program is switched off."""
     by_q: dict[str, list[Candidate]] = {}
     for cd in candidates:
         by_q.setdefault(cd.qid, []).append(cd)

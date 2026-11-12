@@ -1,13 +1,3 @@
-"""Methods that observe a first answer and then decide what to spend next.
-
-``CascadeRouting`` escalates while the estimated gain per normalised cost
-exceeds a price that tracks the remaining budget.  ``UABStyle`` answers every
-question with the small tier and spends what is left on the answers a learned
-scorer is least confident about.  ``VineLMStyle`` plans each request on its own
-share of the budget from profiled success rates per workflow and observation, so
-slack cannot move from one question to another.  All three run under the meter
-with the pacing rule of ``Method``.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -30,16 +20,12 @@ def _openers(library: dict[str, Workflow]) -> dict[str, Workflow]:
 
 
 def _ladder(tier: str, obs: str) -> list[str]:
-    """The escalation steps a cascade may climb after ``tier`` observed ``obs``,
-    each given as the chain run so far: a failed or empty answer is repaired by
-    the large tier, a valid one escalates through the tiers above it."""
     if obs.split(".")[0] in ("error", "empty"):
         return ["rep:L"] if tier else []
     above = [t for t in TIER_ORDER if TIER_ORDER.index(t) > TIER_ORDER.index(tier)]
     return [",".join(f"esc:{t}" for t in above[:i + 1]) for i in range(len(above))]
 
 
-#: The chains a cascade's profiles cover: every rung of every ladder.
 CASCADE_CHAINS = ("stop", "rep:L", "esc:M", "esc:L", "esc:M,esc:L")
 
 
@@ -60,8 +46,6 @@ class CascadeRouting(Method):
         return self
 
     def _choose_tier(self, per_q: np.ndarray) -> str:
-        """The first tier is chosen on other databases: the most accurate one
-        whose mean cost leaves room for an escalation."""
         best, best_acc = "S", -1.0
         for t, p in self.profiles.items():
             if p.n and np.all(p.cost <= per_q * 0.6) and p.acc > best_acc:
@@ -88,8 +72,6 @@ class CascadeRouting(Method):
                 continue
             obs = rec.state.answer_obs or "-"
             spent = np.zeros_like(per_q)
-            # escalate while the estimated gain per normalised cost exceeds a
-            # price that tracks what is left of the budget
             for chain in _ladder(tier, obs):
                 prof = lookup(self.table, tier, obs, chain)
                 if prof is None:
@@ -144,8 +126,6 @@ class UABStyle(Method):
         for rec in ranked:
             if not self.grammar.is_wellformed(chain, rec.state):
                 continue
-            # every question of this group holds an answer; pacing still covers
-            # the batch's later questions when groups share a meter
             expected = self.model.rollout(rec.meta, rec.state, chain, rec.s_held).cost
             if not self._paced(meter, expected, 0):
                 break
@@ -167,7 +147,6 @@ class VineLMStyle(Method):
     specs: tuple[str, ...] = DEFAULT_CONTINUATIONS
 
     def _opening_library(self) -> dict[str, Workflow]:
-        """The workflows a request may open with."""
         return _openers(self.library)
 
     def prepare(self, corpus, train_dbs) -> "VineLMStyle":

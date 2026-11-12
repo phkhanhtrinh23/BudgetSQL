@@ -1,21 +1,3 @@
-"""The agent's turns as modelled effects in the replay.
-
-In the replay, the agent's turns are charged to the budget (the certificate
-decides when a turn is taken; ``PlannerConfig.agent_mode = "modelled"``) but
-their tool calls are not made.  What those calls add to accuracy enters as
-additive per-vector accuracy changes for composition, probing and re-planning,
-whose variance enters the lead's interval.  Budget vectors that are not one of
-the named vectors, such as the cells of the budget grid, read the effects
-interpolated by log budget.
-
-The effects are an input of the evaluation.  ``estimate`` measures them as the
-paired difference between runs whose turns are taken (``agent_mode =
-"live"``) and the replay whose turns are only charged, adding composition,
-probing and re-planning one at a time; ``ModelledEffects.load`` reads effects
-measured elsewhere.  The agent is the workbench's (``Workbench.agent_factory``:
-the language-model agent with ``--chat-agent``), else the rule-based
-``PlanningAgent``, a rule-based stand-in for the language-model agent.
-"""
 from __future__ import annotations
 
 import json
@@ -39,8 +21,6 @@ class Effect:
 
 
 def applies(cfg: PlannerConfig) -> bool:
-    """Whether a run's turns were modelled, so its accuracy carries the
-    modelled effects."""
     return bool(cfg.use_agent and cfg.agent_mode == "modelled")
 
 
@@ -56,8 +36,6 @@ class ModelledEffects:
                       float(sum(e.var for e in comps.values())))
 
     def at(self, budget: str | None = None, vector=None) -> Effect:
-        """The total effect at a named vector, or at any per-question vector by
-        inverse-distance weighting in log budget over the named vectors."""
         if not self.by_vector:
             return Effect()
         if vector is None:
@@ -81,7 +59,6 @@ class ModelledEffects:
         return Effect(float(sum(wi * t.mean for wi, t in zip(w, totals))),
                       float(sum(wi ** 2 * t.var for wi, t in zip(w, totals))))
 
-    # ---- files ----
     def dump(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(
             {b: {c: e.as_dict() for c, e in comps.items()}
@@ -98,9 +75,6 @@ class ModelledEffects:
 
 def estimate(bench, budgets: list[str] | None = None, runs: int | None = None,
              agent_factory=None) -> ModelledEffects:
-    """Measure the effects as paired differences between taken and charged
-    turns: composition alone (the opening session, no probes), with probing,
-    and with the re-planning sessions after it."""
     from ..planner import PlanningAgent
     from .stats import paired_contrast
 

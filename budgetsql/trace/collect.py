@@ -1,14 +1,3 @@
-"""Recording a trace corpus by actually running the stage grammar.
-
-Every stage is run on every question at its largest setting and cheaper
-compositions are recovered as prefixes of the seeded sample order, so a
-three-sample vote and a single call share their first sample.  Each branch keeps
-its own prompt, sample and charged cost: a repair after a vote is a different
-branch from a repair after one sample, and the two are never spliced.
-
-The collector is resumable and stops at a spend cap, so a corpus can be built in
-several sessions.
-"""
 from __future__ import annotations
 
 import json
@@ -44,7 +33,6 @@ class Question:
 
 def load_bird(dev_json: str | Path, db_root: str | Path,
               limit: int | None = None) -> list[Question]:
-    """Read a BIRD-style development file and locate each question's database."""
     items = json.loads(Path(dev_json).read_text())
     out: list[Question] = []
     for i, it in enumerate(items):
@@ -89,7 +77,6 @@ class Collector:
         self._schemas: dict[str, Schema] = {}
         self._samples: dict[tuple, dict] = {}
 
-    # ---- helpers ----
     def schema(self, q: Question) -> Schema:
         got = self._schemas.get(q.db_path)
         if got is None:
@@ -118,10 +105,7 @@ class Collector:
     def reference(self, q: Question) -> ExecResult:
         return execute(q.db_path, q.reference_sql, self.sql_timeout)
 
-    # ---- one stage ----
     def _sample(self, q: Question, tier: str, ctx: str, cap: int, k: int) -> dict:
-        """One sample of a tier, cached so that a longer composition reuses the
-        samples a shorter one already drew."""
         key = (q.qid, tier, ctx, cap, k)
         got = self._samples.get(key)
         if got is not None:
@@ -137,8 +121,6 @@ class Collector:
         return out
 
     def _executed(self, q: Question, draw: dict) -> ExecResult:
-        """A sample's SQL executed once; Generate executes it only to score the
-        trace, and the Execute stage is what is charged for it."""
         got = draw.get("exec")
         if got is None:
             got = execute(q.db_path, draw["sql"], self.sql_timeout)
@@ -147,7 +129,6 @@ class Collector:
 
     def run_stage(self, q: Question, ref: ExecResult, state: State, stage: Stage,
                   held: _Answer | None) -> tuple[StageOutcome, _Answer | None]:
-        """Run one stage and return its record and the answer held after it."""
         if stage.kind == "context":
             return StageOutcome("ok", vec(0, 0, 0.05), vec(0, 0, 0.2)), held
 
@@ -160,7 +141,6 @@ class Collector:
                 res = self._executed(q, d)
                 answers.append(_Answer(d["sql"], res, matches(res, ref)))
             pick = _vote(answers)
-            # the calls only: running the SQL is the Execute stage's cost
             cost = vec(sum(d["usd"] for d in draws),
                        sum(d["prompt_tokens"] + d["completion_tokens"] for d in draws),
                        sum(d["latency"] for d in draws))
@@ -187,7 +167,6 @@ class Collector:
                                       state.answer_stage.cap, used + i)
                          for i in range(stage.samples)]
                 results = [self._executed(q, d) for d in draws]
-                # samples agree when their results agree, as the vote counts them
                 from ..executors.sql import result_key
                 keys = {result_key(r.rows) for r in results}
                 n_distinct = float(len(keys))
@@ -242,7 +221,6 @@ class Collector:
             return out, new
         raise ValueError(f"cannot run stage {stage.id}")
 
-    # ---- one question ----
     def collect_question(self, q: Question) -> tuple[QuestionMeta, dict]:
         ref = self.reference(q)
         meta = self.meta(q)
@@ -262,14 +240,11 @@ class Collector:
                 here[stage.id] = out
                 if seen + len(frontier) < self.max_states:
                     frontier.append((state.append(stage, out.obs), new_held))
-                # the branch on which Select rejects the new answer keeps the
-                # old one held, so later stages read it
                 if (stage.kind in REPLACING and held is not None
                         and seen + len(frontier) < self.max_states):
                     frontier.append((state.append(stage, out.obs, keep=False), held))
         return meta, branches
 
-    # ---- a corpus ----
     def collect(self, questions: list[Question], out_path: str | Path,
                 resume: bool = True) -> dict:
         out_path = Path(out_path)
@@ -312,8 +287,6 @@ def _key(a: _Answer) -> tuple:
 
 
 def _vote(answers: list[_Answer]) -> _Answer:
-    """The answer a vote among samples holds: the most common result, ties to
-    the first sample."""
     counts: dict[tuple, int] = {}
     for a in answers:
         counts[_key(a)] = counts.get(_key(a), 0) + 1
@@ -325,7 +298,6 @@ def _vote(answers: list[_Answer]) -> _Answer:
 
 
 def _worst(replies: list[dict], stage: Stage) -> np.ndarray:
-    """The reservation the meter would have held for this call."""
     from ..config import PRICES
     price = PRICES.get(stage.tier)
     prompt = float(np.mean([r.get("prompt_tokens", 0) for r in replies]) or 0.0)

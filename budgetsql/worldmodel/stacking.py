@@ -1,13 +1,3 @@
-"""Calibrating candidate values before they are allocated.
-
-An allocation that picks among noisy predictions favours whatever it
-over-estimates, and a rollout compounds the errors of the stages it composes.
-Each candidate therefore gets two predictions --- the stage-level rollout and a
-head trained on complete workflows --- and a small stack maps the pair onto the
-realised outcome.  The stacks are cross-fitted twice over databases: the stack
-that plans a database is fitted on other databases' rows, and each of those rows
-was scored by heads that saw neither the planned database nor the row's own.
-"""
 from __future__ import annotations
 
 import zlib
@@ -29,13 +19,10 @@ TIER_ORDER = ("S", "M", "L")
 
 
 def workflow_descriptor(wf: Workflow) -> np.ndarray:
-    """A fixed-size description of a whole workflow for the direct head."""
     return _descriptor(list(wf.stages()), wf.depth(), wf.max_llm_calls())
 
 
 def state_descriptor(state: State) -> np.ndarray:
-    """The same description for the stages a question has already run, so the
-    answer it holds can be scored by the same head."""
     stages = [st for st, _ in state.history]
     calls = sum(st.llm_calls for st in stages)
     return _descriptor(stages, len(stages), calls)
@@ -59,10 +46,6 @@ N_DESCRIPTOR = len(_descriptor([], 0, 0))
 
 
 def descriptor_box(grammar: Grammar, state: State) -> tuple[np.ndarray, np.ndarray]:
-    """Bounds on ``workflow_descriptor(w)`` over every composition ``w`` the
-    grammar admits from ``state``, stop excluded: at most as many stages as the
-    largest decision tree the grammar allows, at most its depth and its calls
-    left, and every flag, count and tier free within those limits."""
     memo: dict = {}
 
     def sig(st: State) -> tuple:
@@ -73,7 +56,6 @@ def descriptor_box(grammar: Grammar, state: State) -> tuple[np.ndarray, np.ndarr
                 st.ctx)
 
     def walk(st: State) -> tuple[int, int, int]:
-        """(largest tree, deepest branch, most samples) from ``st``."""
         key = sig(st)
         if key in memo:
             return memo[key]
@@ -121,9 +103,6 @@ class DirectHead:
 
     def range_over(self, state_part: np.ndarray, lo: np.ndarray,
                    hi: np.ndarray) -> tuple[float, float]:
-        """The smallest and largest prediction for one state over every
-        workflow descriptor in the box ``[lo, hi]``.  The head is logistic in
-        its scaled inputs, so each extreme sits at a corner of the box."""
         if self.model is None:
             return self.prior, self.prior
         scaler, logit = self.model[0], self.model[-1]
@@ -144,8 +123,6 @@ class ValueStack:
 
     correctness: object | None = None
     gain: object | None = None
-    #: the stack of a whole composition planned from the empty state, which
-    #: values the opening plan
     opening: object | None = None
     fallback_weight: float = 0.5
 
@@ -194,18 +171,13 @@ class StackedValues:
     cfg: PlannerConfig = field(default_factory=PlannerConfig)
 
     def with_cfg(self, cfg: PlannerConfig) -> "StackedValues":
-        """The same calibration read under another configuration."""
         return StackedValues(self.model.clone(cfg), self.direct, self.stack, cfg)
 
     def _phi(self, meta, state) -> np.ndarray:
-        """``phi`` with the world model's input ablations, which the direct
-        head and the stacks honour too."""
         return phi(meta, state, use_question=self.cfg.use_question_features,
                    use_execution=self.cfg.use_execution_features)
 
     def _features(self, metas, states, wfs) -> np.ndarray:
-        """A row per candidate: the question's state and what the candidate is.
-        Stop is described by the stages the question has already run."""
         return np.stack([
             np.concatenate([self._phi(m, s),
                             state_descriptor(s) if w.is_stop
@@ -215,34 +187,26 @@ class StackedValues:
 
     def values(self, metas: list[QuestionMeta], states: list[State],
                wfs: list[Workflow], rolls: list, s_held: list[float]) -> np.ndarray:
-        """Stacked value of each candidate: stop keeps the held answer's
-        calibrated correctness, a continuation adds its calibrated gain."""
         held = np.asarray(s_held, dtype=float)
         rolled = np.array([h if w.is_stop else r.p
                            for w, r, h in zip(wfs, rolls, held)])
         if not self.cfg.use_stacking and self.cfg.use_rollouts:
             return np.clip(rolled, 0.0, 1.0)
 
-        # two predictions per candidate, and the same two for the answer held
         d_candidate = self.direct.predict(self._features(metas, states, wfs))
         d_held = self.direct.predict(
             self._features(metas, states, [STOP] * len(wfs)))
         if not self.cfg.use_rollouts:
-            # score each composition as a whole, without rolling its stages out
             rolled, held = d_candidate, d_held
             if not self.cfg.use_stacking:
                 return np.clip(rolled, 0.0, 1.0)
 
-        # the calibrated correctness of the answer held, and the calibrated gain
-        # a continuation would add to it
         held_value = self.stack.value(np.stack([held, d_held], axis=1))
         gain = self.stack.gain_of(np.stack([rolled - held,
                                             d_candidate - d_held], axis=1))
         out = held_value + np.clip(gain, -1.0, 1.0)
         empty = np.array([not st.has_answer for st in states])
         if empty.any():
-            # nothing is held yet: a whole composition, valued by the stack
-            # fitted on held-out opening rows
             opened = self.stack.opening_value(
                 np.stack([rolled[empty], d_candidate[empty]], axis=1))
         k = 0
@@ -258,20 +222,6 @@ class StackedValues:
     def bound_forms(self, metas: list[QuestionMeta], states: list[State],
                     s_held: list[float], grammar: Grammar | None = None
                     ) -> list[tuple[float, float, float, float]]:
-        """For each question, ``(stop, const, scale, bonus)`` such that every
-        continuation w the grammar admits satisfies
-
-            p-tilde(w) <= const + scale * p-hat(w) + bonus,
-
-        with ``stop`` the stacked value of keeping the held answer.  The stacks
-        are linear in the rollout, so ``scale * p-hat(w) - lambda' c-hat(w)`` is
-        maximised over every composition exactly by backward induction; the
-        direct head reads a whole workflow, and ``bonus`` bounds its share by
-        its largest value over every workflow description the grammar allows
-        from the state (``descriptor_box``).  A Psi computed from this bound is
-        at least the exact one, so a failed test still proves that no turn
-        can pay.  A continuation whose clipped value falls to zero is
-        dominated by stop, which keeps the bound valid."""
         grammar = grammar or Grammar()
         held = np.asarray(s_held, dtype=float)
         n = len(metas)
@@ -285,7 +235,6 @@ class StackedValues:
             lo, hi = descriptor_box(grammar, state)
             ranges.append(self.direct.range_over(X_held[i, :k], lo, hi))
         if not self.cfg.use_stacking:
-            # flat model, no stack: a continuation's value is the direct head
             return [(float(np.clip(d, 0.0, 1.0)), 0.0, 0.0, rng[1])
                     for d, rng in zip(d_held, ranges)]
         held_in = held if self.cfg.use_rollouts else d_held
@@ -301,7 +250,6 @@ class StackedValues:
         for i, state in enumerate(states):
             d_lo, d_hi = ranges[i]
             if not state.has_answer:
-                # nothing is held yet, so the rollout is the whole value
                 out.append((0.0, 0.0, 1.0, 0.0) if self.cfg.use_rollouts
                            else (0.0, 0.0, 0.0, d_hi))
                 continue
@@ -345,12 +293,6 @@ class CrossFitStacker:
                    use_execution=self.cfg.use_execution_features)
 
     def _keeps(self, meta, oname: str, spec: str) -> bool:
-        """Whether a thinned corpus traces this composition on this question.
-
-        A thinned corpus records one composition per question, as a deployment
-        that cannot replay everything would, so no question has the outcome of
-        a whole workflow other than its own.
-        """
         if not self.thin:
             return True
         combos = [(o, c) for o in self.openers
@@ -382,8 +324,6 @@ class CrossFitStacker:
             X = np.vstack([r.features for r in rows])
             S = np.vstack([r.state_features for r in rows])
             y = np.array([r.realised for r in rows])
-            # the direct head is cross-fitted like the rollouts: each row is
-            # scored by a head trained without that row's databases
             fold_of = np.asarray(fold_of)
             d_candidate = np.zeros(len(rows))
             d_held = np.zeros(len(rows))
@@ -398,8 +338,6 @@ class CrossFitStacker:
             rolled = np.array([r.rolled for r in rows])
             held = np.array([r.held for r in rows])
             if not self.cfg.use_rollouts:
-                # the flat model scores whole workflows: its stacks are fitted
-                # on the direct head's predictions, which is what they read
                 rolled, held = d_candidate.copy(), d_held.copy()
             if is_stop.any():
                 stack.fit_correctness(
@@ -418,8 +356,6 @@ class CrossFitStacker:
 
     def _score_opening(self, corpus: TraceCorpus, inner: StageWorldModel,
                        metas: list) -> list["_Row"]:
-        """Rows for the opening plan: each composition the opening solve may
-        choose, scored from the empty state and realised whole, under Select."""
         rows: list[_Row] = []
         opening = [wf for wf in self.workflows.values() if single_call_first(wf)]
         if not opening:
@@ -474,8 +410,6 @@ class CrossFitStacker:
                 rolls = inner.rollout_many([(m, s, chain) for m, s, _, _ in eligible],
                                            [h for _, _, _, h in eligible])
                 for (meta, state, stop, held), roll in zip(eligible, rolls):
-                    # realised as the planner would run it: Select decides
-                    # whether each new answer is kept
                     _, ok, _, _ = corpus.run(meta, state, chain, held=bool(stop),
                                              select=selector(inner, meta, held))
                     rows.append(_Row(
@@ -488,9 +422,6 @@ class CrossFitStacker:
 
 
 def selector(model: StageWorldModel, meta: QuestionMeta, s_held: float):
-    """Select as ``TraceCorpus.run`` asks for it: the decision on each replacing
-    stage's new answer, tracking the held answer's predicted correctness along
-    the branch.  With Select off, every new answer is kept."""
     s = [float(s_held)]
 
     def select(state: State, stage, out) -> bool:

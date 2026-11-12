@@ -1,10 +1,3 @@
-"""A trace source backed by records on disk.
-
-The file format is one JSON object per question.  ``branches`` maps a branch key
--- the stages run so far with what each returned -- to the stages recorded after
-it, so a workflow is replayed by walking its own branch and never by splicing
-one branch into another.
-"""
 from __future__ import annotations
 
 import gzip
@@ -32,8 +25,6 @@ def _open(path: str | Path, mode: str):
 
 
 def write_jsonl(path: str | Path, questions: Iterable[tuple[QuestionMeta, dict]]) -> int:
-    """Write one record per question.  ``branches`` is a mapping from a branch
-    key to ``{stage id: StageOutcome}``."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with _open(path, "w") as fh:
@@ -108,11 +99,6 @@ class RecordedTrace:
 
 def materialise(source, questions: Iterable[QuestionMeta], grammar,
                 max_states: int = 64) -> Iterator[tuple[QuestionMeta, dict]]:
-    """Walk the grammar's branches on a source and yield writable records.
-
-    Used to freeze a simulated or partially collected trace into a file so that
-    every method replays exactly the same outcomes.
-    """
     for meta in questions:
         branches: dict[str, dict[str, StageOutcome]] = {}
         frontier = [State()]

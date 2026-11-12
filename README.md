@@ -31,6 +31,11 @@ budgetsql collect --dev-json dev.json --db-root dev_databases --out data/bird.js
 budgetsql simulate --out data/sim.jsonl          # no API needed
 ```
 
+The simulator draws outcomes from a difficulty model instead of calling a
+model. It is there for development and the tests, and for trying the planner
+without an API key; it is not the paper's protocol, which replays a corpus
+recorded with real executors.
+
 Models are set by environment variable (`BUDGETSQL_MODEL_S/M/L`,
 `BUDGETSQL_MODEL_AGENT`, `BUDGETSQL_BASE_URL`); any OpenAI-compatible endpoint
 works.
@@ -40,6 +45,7 @@ works.
 ```bash
 budgetsql run --method budgetsql --budget V4
 budgetsql exp main --trace data/bird.jsonl       # budgetsql exp --help lists the others
+budgetsql library --trace data/bird.jsonl        # accuracy and cost of the reference workflows
 budgetsql verify                                 # exact checks of the escalation algebra
 budgetsql report runs/main.json
 ```

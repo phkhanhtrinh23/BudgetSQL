@@ -1,9 +1,3 @@
-"""Profiled statistics: what a workflow or a continuation did on average.
-
-These are the aggregates a planner has when it does not predict per question:
-one success rate and one cost vector per workflow, and, for a continuation, one
-per observation of the stage that ran first.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -33,7 +27,6 @@ class Profile:
 
 def profile_library(corpus: TraceCorpus, dbs: list[str],
                     library: dict[str, Workflow]) -> dict[str, Profile]:
-    """Run every workflow to completion on the training questions."""
     out = {name: Profile() for name in library}
     metas = [m for d in dbs for m in corpus.questions_of(d)]
     for name, wf in library.items():
@@ -47,8 +40,6 @@ def profile_continuations(corpus: TraceCorpus, dbs: list[str],
                           openers: dict[str, Workflow],
                           specs: tuple[str, ...] = DEFAULT_CONTINUATIONS
                           ) -> dict[tuple[str, str, str], Profile]:
-    """For each opening workflow, each observation it can return and each
-    continuation, the success rate and cost of the continuation."""
     out: dict[tuple[str, str, str], Profile] = {}
     metas = [m for d in dbs for m in corpus.questions_of(d)]
     chains = {s: (None if s == "stop" else parse_chain(s)) for s in specs}

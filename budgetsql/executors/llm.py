@@ -1,10 +1,3 @@
-"""A small client for OpenAI-compatible chat endpoints.
-
-Costs come from the usage the provider returns, priced at the tier's list price,
-so what the meter charges is what the deployment pays.  Completion limits and
-timeouts are passed through, because the meter sets them from what the remaining
-budget can cover.
-"""
 from __future__ import annotations
 
 import json
@@ -37,7 +30,6 @@ class ChatClient:
     def __post_init__(self) -> None:
         self.price = self.price or PRICES.get(self.tier) or PRICES["M"]
 
-    # ---- the call ----
     def chat(self, messages: list[dict], max_tokens: int = 600,
              temperature: float = 0.0, timeout: float | None = None,
              n: int = 1, seed: int | None = None, retries: int | None = None) -> dict:
@@ -95,15 +87,12 @@ class ChatClient:
 
 
 def extract_sql(text: str) -> str:
-    """The query out of a reply, preferring the last fenced block."""
     blocks = re.findall(r"```(?:sql)?\s*(.*?)```", text, flags=re.S | re.I)
     sql = (blocks[-1] if blocks else text).strip()
     return sql.rstrip(";").strip()
 
 
 def tiers_from_env() -> dict[str, ChatClient]:
-    """Executor tiers and the planning agent, named by environment variables so
-    a deployment can point them at any compatible endpoint."""
     return {
         "S": ChatClient(os.environ.get("BUDGETSQL_MODEL_S", "qwen2.5-7b-instruct"), "S"),
         "M": ChatClient(os.environ.get("BUDGETSQL_MODEL_M", "gpt-4.1-mini"), "M"),

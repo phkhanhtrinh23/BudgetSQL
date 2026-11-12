@@ -1,16 +1,3 @@
-"""Wiring a workload, a world model and a set of methods into runs.
-
-Every learned component that scores a question is fitted on the other budget
-groups, so no question is planned with a model that has seen its schema, and
-every setting a method tunes is chosen on the other groups too.  Fitted
-components are cached on disk, because a sweep re-uses them many times.
-
-A run covers the whole batch: each budget group has its own share of the
-budget and its own meter, BudgetSQL plans the groups with one agent and one
-digest (``BatchPlanner``), and so do the agent baselines.  When BudgetSQL's
-turns are modelled, its result carries the modelled effect of the vector
-(``budgetsql.eval.effects``).
-"""
 from __future__ import annotations
 
 import hashlib
@@ -66,14 +53,7 @@ class Workbench:
     cache_dir: Path | None = None
     library: dict = field(default_factory=reference_library)
     inner_folds: int = 4
-    #: The agent's modelled effects per budget vector; none
-    #: leaves BudgetSQL at its replayed accuracy.
     effects: ModelledEffects = field(default_factory=ModelledEffects)
-    #: Builds the agent whose turns are taken in live mode, for BudgetSQL and
-    #: for the agent baselines alike; called with ``probe`` (may it probe).
-    #: ``None`` uses the rule-based stand-ins (``PlanningAgent`` for BudgetSQL,
-    #: ``BudgetTrackerAgent`` for the baselines); ``chat_agent_from_env`` is the
-    #: language-model agent.
     agent_factory: object = None
 
     def __post_init__(self) -> None:
@@ -84,7 +64,6 @@ class Workbench:
             self.cache_dir = Path(self.cache_dir)
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---- budget groups ----
     def groups(self) -> list[BudgetGroup]:
         if self.workload.budget_groups == "fold":
             folds = split_dbs(self.corpus.dbs, self.workload.folds, seed=0)
@@ -95,7 +74,6 @@ class Workbench:
                 for db in self.corpus.dbs]
 
     def pooled_group(self) -> BudgetGroup:
-        """Every question under one budget."""
         groups = self.groups()
         return BudgetGroup("pooled", [d for g in groups for d in g.dbs],
                            [m for g in groups for m in g.metas])
@@ -103,7 +81,6 @@ class Workbench:
     def train_dbs(self, group: BudgetGroup) -> list[str]:
         return [d for d in self.corpus.dbs if d not in group.dbs]
 
-    # ---- cached components ----
     def _cached(self, key: str, build):
         if self.cache_dir is None:
             return build()
@@ -141,8 +118,6 @@ class Workbench:
 
     def thinned_values(self, group: BudgetGroup, cfg: PlannerConfig | None = None
                        ) -> StackedValues:
-        """The same calibration from a corpus that traces one composition per
-        training question rather than all of them."""
         cfg = cfg or self.cfg
         key = (f"thin-{CACHE_VERSION}-{group.name}-"
                f"{_hash(cfg.training_key(), self.inner_folds)}")
@@ -207,7 +182,6 @@ class Workbench:
 
     def effect(self, cfg: PlannerConfig, budget: str | None, vector=None,
                budget_scale: float = 1.0) -> Effect:
-        """The modelled effect a BudgetSQL run under ``cfg`` carries."""
         if not applies(cfg):
             return Effect()
         if vector is None and budget_scale != 1.0:
@@ -215,10 +189,8 @@ class Workbench:
             vector = BUDGETS[budget] * budget_scale
         return self.effects.at(budget, vector)
 
-    # ---- runs ----
     def order_metas(self, metas: list[QuestionMeta], run: int,
                     order: str = "random") -> list[QuestionMeta]:
-        """The order the questions arrive in."""
         out = list(metas)
         random.Random((run + 1) * 7919).shuffle(out)
         rank = {"simple": 0, "moderate": 1, "challenging": 2}
@@ -233,11 +205,6 @@ class Workbench:
                    budget_scale: float = 1.0, order: str = "random",
                    vector=None, thinned: bool = False, agent_factory=None,
                    with_effects: bool = True) -> dict:
-        """Run one method on the whole batch, over several question orders.
-
-        Every budget group gets its share of the budget and its own meter.
-        BudgetSQL and the agent baselines plan the groups together, with one
-        agent whose turns each group pays in proportion to its questions."""
         cfg = cfg or self.cfg
         runs = runs or self.workload.runs
         per_run: list[dict[str, bool]] = []
@@ -263,7 +230,6 @@ class Workbench:
             elif BASELINES.get(name) in (AgentNoWorldModel, AgentDryRuns):
                 methods = [self.method(name, g, cfg).with_cfg(cfg) for g in groups]
                 if self.agent_factory is not None:
-                    # the same agent model and tools, without the world model
                     for m in methods:
                         m.agent_factory = lambda: self.agent_factory(True)
                 results = run_agent_batch(methods, items)

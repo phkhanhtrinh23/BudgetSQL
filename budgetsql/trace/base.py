@@ -1,4 +1,3 @@
-"""What one stage returned on one question, and where such records come from."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -31,7 +30,6 @@ class StageOutcome:
     equal_to_held: bool = False
     latency: float = 0.0
 
-    # ---- labels the heads train on ----
     @property
     def is_fix(self) -> bool:
         return (self.answer_correct is True) and (self.held_before is False)
@@ -83,5 +81,4 @@ class TraceSource(Protocol):
         ...
 
     def outcome(self, meta: QuestionMeta, state: State, stage: Stage) -> StageOutcome | None:
-        """What ``stage`` returns on this question after exactly this history."""
         ...

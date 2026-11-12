@@ -1,4 +1,3 @@
-"""The prompts each stage sends."""
 from __future__ import annotations
 
 SYSTEM = ("You are an expert SQLite analyst. Given a database schema, a question "

@@ -1,4 +1,3 @@
-"""The fixed feature summary ``phi(h)`` the world model's heads read."""
 from __future__ import annotations
 
 import math
@@ -7,7 +6,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .config import TIERS
-from .grammar import CTX_LEVELS, EXEC_STATUS, Observables, Stage, State
+from .grammar import (CTX_KEEP_SHARE, CTX_LEVELS, EXEC_STATUS, Observables,
+                      Stage, State)
 
 STAGE_KINDS = ("context", "generate", "execute", "repair", "verify", "escalate")
 
@@ -28,9 +28,9 @@ class QuestionMeta:
     def prompt_at(self, level: str) -> int:
         if level in self.prompt_tokens:
             return self.prompt_tokens[level]
-        base = self.n_schema_tokens + self.n_question_tokens + self.n_evidence_tokens
-        shrink = {"full": 1.0, "prune1": 0.59, "prune2": 0.42}.get(level, 1.0)
-        return int(base * shrink)
+        keep = CTX_KEEP_SHARE.get(level, 1.0)
+        return int(self.n_schema_tokens * keep
+                   + self.n_question_tokens + self.n_evidence_tokens)
 
 
 def _log1p(x: float) -> float:
@@ -64,11 +64,6 @@ HISTORY_SLICE = slice(len(QUESTION_COLUMNS), N_FEATURES)
 
 def phi(meta: QuestionMeta, state: State, obs: Observables | None = None,
         use_question: bool = True, use_execution: bool = True) -> np.ndarray:
-    """Feature vector of a state: the question part, fixed before anything
-    runs, and the history part, including the held answer's observables (the
-    agreement of its samples, its completion's length and the agreement of
-    earlier answers with it).  ``use_question`` / ``use_execution`` drop one
-    part of the summary for the world-model input ablations."""
     x = np.zeros(N_FEATURES, dtype=float)
     obs = obs or state.observables
 
@@ -130,9 +125,6 @@ def phi(meta: QuestionMeta, state: State, obs: Observables | None = None,
 
 
 def differential_mask() -> np.ndarray:
-    """Columns the fix-and-regression heads lose without differential features:
-    the agreement among samples and between answers, and the new answer's
-    execution."""
     keep = np.ones(N_FEATURES, dtype=bool)
     for c in ("h.agree", "h.split", "h.n_distinct", "h.frac_earlier_equal",
               "h.n_earlier_answers"):
@@ -145,8 +137,6 @@ def differential_mask() -> np.ndarray:
 
 
 def stage_descriptor(stage: Stage) -> np.ndarray:
-    """A stage's own descriptor, appended to ``phi(h)`` when one head serves
-    several stages of a type."""
     v = np.zeros(len(STAGE_KINDS) + len(TIERS) + 2 + len(CTX_LEVELS), dtype=float)
     v[STAGE_KINDS.index(stage.kind)] = 1.0
     if stage.tier:

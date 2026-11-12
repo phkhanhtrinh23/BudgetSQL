@@ -1,16 +1,3 @@
-"""Methods that decide before observing anything.
-
-``BestFixedMixture`` picks, per budget group, the random mixture of workflows
-with the highest accuracy on other databases whose predicted mean cost fits the
-group's budget in every dimension.  ``BestFixedWorkflow`` picks one workflow the
-same way, from the one-shot workflows of the reference table and the pruned
-``M_c+R_L``.  ``OmniRouterStyle`` couples the batch in one
-linear program, but solves it once on predictions made before any answer exists.
-``Oracle`` is the hindsight optimum of the same relaxation with true outcomes:
-it reports the relaxation's value, not a rounded plan's.
-
-All but the oracle run under the shared pacing rule (``Method._paced``).
-"""
 from __future__ import annotations
 
 import random
@@ -31,7 +18,6 @@ from .profiles import Profile, profile_library
 
 def mixture_lp(names: list[str], profiles: dict[str, Profile],
                per_question_budget: np.ndarray) -> dict[str, float]:
-    """The best feasible random mixture of workflows, as shares that sum to one."""
     acc = np.array([profiles[n].acc for n in names])
     cost = np.stack([profiles[n].cost for n in names], axis=1)
     res = linprog(-acc, A_ub=cost, b_ub=np.asarray(per_question_budget, dtype=float),
@@ -85,8 +71,6 @@ class BestFixedMixture(Method):
         return self._result(records, meter, predicted)
 
 
-#: What a deployment that runs one workflow for every question may choose from:
-#: the one-shot reference workflows and the pruned repair chain.
 ONE_SHOT = tuple(LIBRARY_ORDER[:13]) + ("M_c+R_L",)
 
 
@@ -185,10 +169,6 @@ class Oracle(Method):
     name: str = "oracle"
 
     def run(self, metas, budget, meter=None) -> RunResult:
-        """The value of the linear relaxation at the true outcomes and costs.
-        A question's entry in ``correct`` is its fractional value
-        ``sum_w x_iw Y_iw``, so the reported accuracy is the relaxation's
-        optimum, not that of a rounded plan."""
         meter = meter or Meter(budget)
         cands: list[Candidate] = []
         for m in metas:

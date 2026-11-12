@@ -1,8 +1,3 @@
-"""The comparisons this package is built to run.
-
-Each function takes a workbench and returns a plain dictionary, so results can
-be written to JSON and rendered later.
-"""
 from __future__ import annotations
 
 import random
@@ -35,49 +30,37 @@ def _eff(res: dict) -> Effect:
 
 
 def _acc(res: dict) -> tuple[float, float]:
-    """A result's accuracy in points, its modelled effect included."""
     return accuracy(res["runs"], _eff(res).mean)
 
 
 def _lead(a: dict, b: dict, unit_of: dict) -> object:
-    """The lead of result ``a`` over ``b``, each with its modelled effect."""
     ea, eb = _eff(a), _eff(b)
     return lead(a["runs"], b["runs"], unit_of, offset=ea.mean - eb.mean,
                 offset_var=ea.var + eb.var)
 
 
 def _contrast(a: dict, b: dict) -> object:
-    """A paired contrast between two arms; a modelled effect both arms carry
-    cancels, one that only one arm carries adds its variance."""
     ea, eb = _eff(a), _eff(b)
     same = ea.mean == eb.mean and ea.var == eb.var
     return paired_contrast(a["runs"], b["runs"], offset=ea.mean - eb.mean,
                            offset_var=0.0 if same else ea.var + eb.var)
 
 
-# --------------------------------------------------------------------------- #
-# accuracy at matched budgets
-# --------------------------------------------------------------------------- #
 BIRD_ONLY = ("best_fixed_workflow",)
 
 
 def default_methods(bench: Workbench) -> list[str]:
-    """Every baseline the workload admits.  One fixed workflow per database is
-    a BIRD row, because a Spider fold spans several databases."""
     if bench.workload.budget_groups == "db":
         return list(BASELINES)
     return [m for m in BASELINES if m not in BIRD_ONLY]
 
 
-#: Agent baselines whose BIRD rows are derived rather than replayed directly.
 DERIVED_AGENTS = ("llm_agent", "llm_agent_dry_runs")
 
 
 def main_table(bench: Workbench, methods: list[str] | None = None,
                budgets: list[str] | None = None, runs: int | None = None,
                oracle: bool = True) -> dict:
-    """The main comparison.  The strongest baseline is the most accurate row, derived rows
-    included; the interval does not correct for that selection."""
     methods = methods or default_methods(bench)
     budgets = budgets or list(bench.workload.budgets)
     unit_of = bench.unit_of()
@@ -126,8 +109,6 @@ def main_table(bench: Workbench, methods: list[str] | None = None,
 def derived_agent_rows(bench: Workbench, agents: list[str], budgets: list[str],
                        runs: int | None = None, base: str = "vinelm_style",
                        anchor: str = "V1") -> dict[str, dict[str, dict]]:
-    """The BIRD rows of the LLM-agent baselines at named budget
-    vectors (``derived_agent_at``)."""
     return {name: {b: derived_agent_at(bench, name, b, None, runs, base, anchor)
                    for b in budgets} for name in agents}
 
@@ -135,17 +116,6 @@ def derived_agent_rows(bench: Workbench, agents: list[str], budgets: list[str],
 def derived_agent_at(bench: Workbench, name: str, budget: str | None, vector=None,
                      runs: int | None = None, base: str = "vinelm_style",
                      anchor: str = "V1") -> dict:
-    """An LLM-agent row on BIRD: the VineLM-style planner's replayed accuracy
-    at the vector, plus the replayed agent's offset from it in V1, less the
-    cost of the agent's turns.
-
-    The offset is measured with the agent's turns taken but neither reserved
-    nor charged (``free_turns``), so their cost is not counted twice; the cost
-    of the turns at a vector is what the VineLM-style planner loses when its
-    budget shrinks by what the agent's turns spent per question in the V1
-    replay.  The row is the VineLM-style runs carrying that scalar, whose
-    variance is the offset's paired variance.  The V1 quantities are measured
-    once per workbench."""
     cache = bench.__dict__.setdefault("_derived_anchor", {})
     key = (name, base, anchor, runs)
     if key not in cache:
@@ -168,9 +138,6 @@ def derived_agent_at(bench: Workbench, name: str, budget: str | None, vector=Non
 
 
 def replayed_baselines(bench: Workbench) -> list[str]:
-    """The baselines replayed directly.  Outside the main comparison the
-    strongest baseline is the most accurate replayed one, so on BIRD the derived
-    LLM-agent rows are left out; on Spider 2.0-Lite they are replays."""
     if bench.workload.budget_groups == "db":
         return [m for m in default_methods(bench) if m not in DERIVED_AGENTS]
     return default_methods(bench)
@@ -178,7 +145,6 @@ def replayed_baselines(bench: Workbench) -> list[str]:
 
 def _result(bench: Workbench, name: str, budget: str | None, runs: int | None,
             vector=None) -> dict:
-    """A method's result, the derived row for an LLM agent on BIRD."""
     if bench.workload.budget_groups == "db" and name in DERIVED_AGENTS:
         return derived_agent_at(bench, name, budget, vector, runs)
     return bench.run_method(name, budget, runs, vector=vector)
@@ -186,8 +152,6 @@ def _result(bench: Workbench, name: str, budget: str | None, runs: int | None,
 
 def budget_sweep(bench: Workbench, methods: list[str] | None = None,
                  money: tuple[float, ...] = SWEEP_MONEY, runs: int = 1) -> dict:
-    """Accuracy against the money budget per question, with tokens
-    and service time unbounded."""
     methods = methods or ["best_fixed_mixture", "cascade_routing", "uab_style",
                           "omnirouter_style", "vinelm_style", "llm_agent"]
     out: dict = {"money": list(money), "curves": {}}
@@ -203,8 +167,6 @@ def budget_sweep(bench: Workbench, methods: list[str] | None = None,
 def budget_grid(bench: Workbench, pairs: tuple[tuple[str, str], ...] =
                 (("usd", "sec"), ("usd", "tok")), runs: int = 3,
                 methods: list[str] | None = None) -> dict:
-    """The lead over the cell's strongest replayed baseline when two
-    budget dimensions vary and the third is slack."""
     methods = methods or replayed_baselines(bench)
     unit_of = bench.unit_of()
     out: dict = {"axes": {k: list(v) for k, v in GRID_AXES.items()}, "pairs": {}}
@@ -215,7 +177,6 @@ def budget_grid(bench: Workbench, pairs: tuple[tuple[str, str], ...] =
                 vector = np.array([GRID_SLACK[k] for k in DIMS], dtype=float)
                 vector[DIMS.index(x)] = vx
                 vector[DIMS.index(y)] = vy
-                # the modelled agent effects are interpolated by log budget
                 ours = bench.run_method(PLANNER, None, runs, vector=vector)
                 best_name, best_res, best_acc = None, None, -1.0
                 for name in methods:
@@ -244,12 +205,6 @@ def pooled_budget(bench: Workbench, budgets: list[str] | None = None,
                                               "best_fixed_mixture",
                                               "cascade_routing", "uab_style"),
                   runs: int | None = None) -> dict:
-    """One budget for the whole batch instead of one per database.
-
-    The planner reads the pooled batch as a single budget group and can move
-    slack between databases; a baseline still plans each database on its own,
-    under the one shared meter.
-    """
     runs = runs or bench.workload.runs
     budgets = budgets or list(bench.workload.budgets)
     group = bench.pooled_group()
@@ -270,8 +225,6 @@ def pooled_budget(bench: Workbench, budgets: list[str] | None = None,
         for name in [m for m in methods if m in BASELINES]:
             per_run = []
             for r in range(runs):
-                # one meter for the batch; each database plans with the batch's
-                # per-question vector, and paces for every later question
                 meter = Meter(budget)
                 correct: dict[str, bool] = {}
                 subs = bench.groups()
@@ -307,8 +260,6 @@ def pooled_budget(bench: Workbench, budgets: list[str] | None = None,
 def arrival_orders(bench: Workbench, budgets: list[str] | None = None,
                    orders: tuple[str, ...] = ("random", "easy_first", "hard_first"),
                    methods: list[str] | None = None, runs: int | None = None) -> dict:
-    """The lead over the strongest replayed baseline when the
-    questions arrive sorted by difficulty."""
     budgets = budgets or list(bench.workload.budgets)
     methods = methods or replayed_baselines(bench)
     unit_of = bench.unit_of()
@@ -343,7 +294,6 @@ def strata(bench: Workbench, budgets: list[str] | None = None,
            methods: tuple[str, ...] = ("best_fixed_workflow", "best_fixed_mixture",
                                        "uab_style"),
            runs: int | None = None) -> dict:
-    """Accuracy by BIRD difficulty and by schema size."""
     budgets = budgets or list(bench.workload.budgets)
     label_of = {"difficulty": {}, "schema": {}}
     sizes = sorted(m.n_schema_tokens for g in bench.groups() for m in g.metas)
@@ -377,7 +327,6 @@ def strata(bench: Workbench, budgets: list[str] | None = None,
 
 def per_database(bench: Workbench, budgets: list[str] | None = None,
                  methods: list[str] | None = None, runs: int | None = None) -> dict:
-    """The lead over each budget group's own strongest replayed baseline."""
     budgets = budgets or list(bench.workload.budgets)
     methods = methods or replayed_baselines(bench)
     out: dict = {"budgets": {}}
@@ -410,15 +359,8 @@ def _accuracy_on(runs: list[dict[str, bool]], qids: list[str]) -> float:
     return float(np.mean(means)) if means else 0.0
 
 
-# --------------------------------------------------------------------------- #
-# ablations
-# --------------------------------------------------------------------------- #
 def ablation_arms(cfg: PlannerConfig) -> dict[str, object]:
-    """The ablation arms.  Each is either a configuration of the planner or
-    another method; the replay's defaults (rho = 0, online updates off,
-    modelled turns) are what each arm departs from."""
     return {
-        # world model
         "profiled_averages_no_world_model": ProfiledPerRequest,
         "full_data_heads_no_stacks": cfg.with_(use_stacking=False),
         "flat_world_model_no_rollouts": cfg.with_(use_rollouts=False),
@@ -426,7 +368,6 @@ def ablation_arms(cfg: PlannerConfig) -> dict[str, object]:
         "no_differential_features": cfg.with_(use_differential_features=False),
         "scored_before_first_stage": cfg.with_(score_from_empty=True),
         "log_scale_cost_heads": cfg.with_(log_scale_costs=True),
-        # planning
         "core_only_no_agent": cfg.with_(use_agent=False),
         "whole_workflows_before_running": cfg.with_(plan_whole_workflows=True,
                                                     use_agent=False),
@@ -434,7 +375,6 @@ def ablation_arms(cfg: PlannerConfig) -> dict[str, object]:
         "greedy_ranking_no_allocation": cfg.with_(use_allocation_lp=False),
         "with_a_cost_reserve": cfg.with_(cost_reserve=True, reserve_z=1.0),
         "opening_plan_no_periodic_resolves": cfg.with_(periodic_resolves=False),
-        # inputs
         "world_model_question_only": cfg.with_(use_execution_features=False),
         "world_model_execution_only": cfg.with_(use_question_features=False),
     }
@@ -442,8 +382,6 @@ def ablation_arms(cfg: PlannerConfig) -> dict[str, object]:
 
 def ablation(bench: Workbench, budgets: list[str] | None = None,
              arms: dict | None = None, runs: int | None = None) -> dict:
-    """Each ablation arm against the full planner on the same orders and meter,
-    with its own paired 95% half-width."""
     budgets = budgets or list(bench.workload.budgets)
     arms = arms if arms is not None else ablation_arms(bench.cfg)
     out: dict = {"budgets": {}}
@@ -466,7 +404,6 @@ def ablation(bench: Workbench, budgets: list[str] | None = None,
 
 
 def _run_other(bench: Workbench, cls, budget: str, runs: int | None) -> dict:
-    """An arm that is another method, on the planner's question orders."""
     runs = runs or bench.workload.runs
     per_run = []
     details = []
@@ -485,9 +422,6 @@ def _run_other(bench: Workbench, cls, budget: str, runs: int | None) -> dict:
             "details": details}
 
 
-# --------------------------------------------------------------------------- #
-# sensitivity
-# --------------------------------------------------------------------------- #
 def sensitivity(bench: Workbench, budget: str = "V4", runs: int | None = None
                 ) -> dict:
     cfg = bench.cfg
@@ -509,14 +443,8 @@ def sensitivity(bench: Workbench, budget: str = "V4", runs: int | None = None
     return out
 
 
-# --------------------------------------------------------------------------- #
-# world-model quality and online cost updates
-# --------------------------------------------------------------------------- #
 def world_model_quality(bench: Workbench, openers: tuple[str, ...] = ("S", "M")
                         ) -> dict:
-    """How well the model ranks questions before and after a stage has run, how
-    well it detects fixes and regressions, and how far its cost estimates are
-    off on a database it has never seen."""
     out: dict = {"openers": {}, "cost_error": {}}
     cont = parse_chain("esc:L")
     for opener in openers:
@@ -575,21 +503,6 @@ def world_model_quality(bench: Workbench, openers: tuple[str, ...] = ("S", "M")
 def online_learning(bench: Workbench, days: int = 5, day_n: int = 1500,
                     budget: str = "V4", seed: int = 0, label_share: float = 0.30,
                     day_corpus=None) -> dict:
-    """Daily batches from databases the world model has never seen.
-
-    The world model is fitted on the workload's databases, and each day's batch
-    is drawn from other databases: from ``day_corpus`` (the BIRD training
-    databases, 1,500 questions a day), or, without one, from databases held out
-    of the fit.  Four arms, each keeping its own state across days:
-
-    * ``frozen``: a never-updated model;
-    * ``updated``: the online cost updates (the cost ratio kappa);
-    * ``recalibrated``: those plus within-batch recalibration of the success
-      heads from observed execution rates, which needs no reference labels;
-    * ``labelled``: those plus delayed reference labels for ``label_share`` of
-      the previous days' answers, which join the trace corpus before the heads
-      are refit between batches.
-    """
     from ..worldmodel.model import StageWorldModel
 
     rng = random.Random(seed)
@@ -641,8 +554,6 @@ def online_learning(bench: Workbench, days: int = 5, day_n: int = 1500,
 
 
 def _rows_from_history(corpus, records) -> list:
-    """Training rows for the stages a labelled question ran: once its reference
-    is known, every answer it produced can be scored."""
     from ..grammar import ANSWER_PRODUCING
     from ..trace.corpus import TrainingRow
     rows = []
@@ -662,8 +573,6 @@ def _rows_from_history(corpus, records) -> list:
 
 
 def _refit_with(planner, corpus, train_dbs: list[str], extra: list, model_cls) -> None:
-    """Refit the heads on the training corpus plus the labelled rows, keeping
-    the planner's online corrections."""
     old = planner.model
     model = model_cls(old.cfg)
     model.train_dbs = list(train_dbs)
@@ -675,8 +584,6 @@ def _refit_with(planner, corpus, train_dbs: list[str], extra: list, model_cls) -
 
 
 def _median_cost_error(planner, metas) -> float:
-    """The median relative error of the money predicted for each question's
-    first stage at the start of a day, against its recorded cost."""
     from ..grammar import gen
     errs = []
     stage = gen("S")
@@ -691,9 +598,6 @@ def _median_cost_error(planner, metas) -> float:
 
 def calibration(bench: Workbench, budget: str = "V4", bins: int = 10,
                 runs: int | None = None) -> dict:
-    """Reliability of the continuations the planner selects, the
-    stacked value p-tilde it allocated each by against the correctness the
-    replay realised for it."""
     from ..planner import BatchPlanner, PlanningAgent
     runs = runs or 1
     pred, real = [], []
@@ -741,15 +645,6 @@ def calibration(bench: Workbench, budget: str = "V4", bins: int = 10,
 
 def unprofiled_trace(bench: Workbench, budget: str = "V4", opener: str = "S",
                      continuation: str = "esc:L", runs: int = 1) -> dict:
-    """What a world model loses when no question has a whole composition.
-
-    The replay traces every composition on every question, which is what a
-    model scoring whole workflows needs.  Thinning the training corpus to one
-    composition per question leaves that model without a profile, while the
-    stage-level rollouts still compose stages each question did run.  The cost
-    in accuracy is read off the measured sensitivity of accuracy to the
-    ranking's AUROC.
-    """
     cont = parse_chain(continuation)
     arms = {"stage": bench.cfg, "flat": bench.cfg.with_(use_rollouts=False)}
     out: dict = {"budget": budget, "arms": {}}
@@ -809,9 +704,6 @@ def unprofiled_trace(bench: Workbench, budget: str = "V4", opener: str = "S",
     return out
 
 
-# --------------------------------------------------------------------------- #
-# planning overhead and batch size
-# --------------------------------------------------------------------------- #
 def overhead(bench: Workbench, budgets: list[str] | None = None,
              batch_sizes: tuple[int, ...] = (150, 500), runs: int = 1,
              sessions: tuple[int, ...] = (0, 4, 11, 30, 60)) -> dict:
@@ -838,8 +730,6 @@ def overhead(bench: Workbench, budgets: list[str] | None = None,
 
     groups = bench.groups()
     for n in batch_sizes:
-        # take as many budget groups as the batch needs and hold all of them out,
-        # so the batch is planned by a model that has seen none of its schemas
         taken, pool = [], []
         for g in groups:
             taken.append(g)
@@ -860,9 +750,6 @@ def overhead(bench: Workbench, budgets: list[str] | None = None,
 
 
 def _continuations(grammar, state: State, w_max: int) -> list:
-    """Up to ``w_max`` continuations a question may take from its state: each
-    stage the grammar allows next, and a verification with the escalation it
-    would trigger."""
     from ..grammar import branch, shape
     out: dict[str, object] = {}
     for a in grammar.actions(state):
@@ -880,14 +767,6 @@ def scaling(bench: Workbench, sizes: tuple[int, ...] = (1530, 5000, 15000,
                                                        50000, 150000),
             budget: str = "V1", group_size: int = 139,
             limit_s: float = 60.0, whole_up_to: int = 50000) -> dict:
-    """The local CPU time planning needs as the batch grows.
-
-    A batch resampled from the workload is scored once with up to W_max
-    continuations per question (``cfg.max_candidates``) plus stop, and the
-    allocation is solved per budget group of ``group_size`` questions and once
-    for the whole batch, a program of at most |I| W_max variables and |I| + d
-    constraints.  The whole-batch program is abandoned at
-    ``limit_s``."""
     groups = bench.groups()
     pool = [m for g in groups for m in g.metas]
     held = groups[0]
@@ -964,13 +843,8 @@ def scaling(bench: Workbench, sizes: tuple[int, ...] = (1530, 5000, 15000,
     return out
 
 
-# --------------------------------------------------------------------------- #
-# where the gain from escalating comes from
-# --------------------------------------------------------------------------- #
 def trace_frontier(bench: Workbench, pairs=(("M", "L"), ("S", "L"), ("S", "M"))
                    ) -> dict:
-    """The held-out gain of escalation rules that see only the question, only
-    the executed stage's status, or both."""
     corpus = bench.corpus
     lib = bench.library
     metas = corpus.questions
@@ -1022,12 +896,6 @@ def _question_bin(meta) -> str:
 
 def predicted_versus_replayed(bench: Workbench, budgets: list[str] | None = None,
                               runs: int = 1, base: str = "best_fixed_mixture") -> dict:
-    """Gains over the best fixed mixture.  ``predicted`` is the
-    opening plan's value, ``replayed`` the run that starts from it with the
-    agent's budget charged but its turns not taken, ``full`` that run with the
-    modelled effects (BudgetSQL in the main comparison), and ``se`` the paired standard
-    error of the replayed gain.  The same with full-data heads, no held-out
-    stacks, gives the overestimate the stacks remove."""
     budgets = budgets or list(bench.workload.budgets)
     unit_of = bench.unit_of()
     out: dict = {"budgets": {}, "base": base}
@@ -1050,9 +918,6 @@ def predicted_versus_replayed(bench: Workbench, budgets: list[str] | None = None
     return out
 
 
-# --------------------------------------------------------------------------- #
-# deployment scenarios
-# --------------------------------------------------------------------------- #
 @dataclass
 class Scenario:
     """One deployment scenario: who plans and who answers.
@@ -1078,10 +943,6 @@ def default_scenarios(bench: Workbench, open_bench: Workbench | None = None,
                       open_prices: dict | None = None, open_time_scale: float = 1.0,
                       open_agent_price=None, effects_by_agent: dict | None = None
                       ) -> list[Scenario]:
-    """The seven deployment scenarios.  Those with open-weight
-    executors need their trace (``open_bench``) and prices; those with the
-    open-weight agent need its amortised price.  A configuration whose inputs
-    are missing is reported as skipped rather than guessed."""
     from ..config import Price
     eff = effects_by_agent or {}
     gpt5, mini, qwen = None, Price(0.40, 1.60), open_agent_price
@@ -1101,8 +962,6 @@ def default_scenarios(bench: Workbench, open_bench: Workbench | None = None,
 
 def scenarios(bench: Workbench, budget: str = "V4", runs: int = 1,
               presets: list[Scenario] | None = None) -> dict:
-    """BudgetSQL against each configuration's strongest baseline
-    when the agent, the executors or the digest changes."""
     from ..config import PRICES
     presets = presets if presets is not None else default_scenarios(bench)
     out: dict = {"budget": budget, "configurations": {}}
@@ -1154,11 +1013,6 @@ def scenarios(bench: Workbench, budget: str = "V4", runs: int = 1,
 def price_sensitivity(bench: Workbench, factors: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0),
                       base: str = "V1", tier: str = "L", runs: int | None = None,
                       methods: list[str] | None = None) -> dict:
-    """Accuracy as the large tier's price changes, read from the
-    money sweep.  A price change by k acts on a method like a change of its
-    money, in proportion to its share of money on that tier, so each method
-    runs at the effective money m / (1 + (k - 1) share), with its share
-    measured at ``base``."""
     methods = methods or replayed_baselines(bench)
     v = BUDGETS[base]
     out: dict = {"base": base, "tier": tier, "factors": list(factors), "methods": {}}
@@ -1182,9 +1036,6 @@ def price_sensitivity(bench: Workbench, factors: tuple[float, ...] = (0.5, 1.0, 
     return out
 
 
-# --------------------------------------------------------------------------- #
-# helpers
-# --------------------------------------------------------------------------- #
 def _auc(y, p) -> float:
     y = np.asarray(y); p = np.asarray(p, dtype=float)
     if len(y) < 4 or len(np.unique(y)) < 2:
@@ -1224,7 +1075,6 @@ def _mean_binding(details: list[dict]) -> dict:
 
 
 def _planning_spend(details: list[dict]) -> np.ndarray:
-    """What planning spent, summed over the runs' budget groups."""
     out = np.zeros(len(DIMS))
     for d in details:
         share = d.get("planning_share") or {}

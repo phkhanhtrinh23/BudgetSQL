@@ -1,4 +1,3 @@
-"""Command line entry point."""
 from __future__ import annotations
 
 import argparse
@@ -20,9 +19,6 @@ PROFILES = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# building a workbench
-# --------------------------------------------------------------------------- #
 def make_corpus(args):
     from .config import use_workload_prices
     from .trace import RecordedTrace, SimulatedTrace, TraceCorpus
@@ -68,7 +64,6 @@ def make_bench(args) -> Workbench:
 
 
 def make_day_corpus(args):
-    """The trace of the databases the online experiment draws its days from."""
     if not getattr(args, "day_trace", None):
         return None
     from .trace import RecordedTrace, TraceCorpus
@@ -86,9 +81,6 @@ def write(args, kind: str, result) -> None:
         print(f"\nwritten to {out} and {out.with_suffix('.txt')}", file=sys.stderr)
 
 
-# --------------------------------------------------------------------------- #
-# commands
-# --------------------------------------------------------------------------- #
 def cmd_simulate(args) -> None:
     from .config import use_workload_prices
     from .trace import SimulatedTrace, materialise, write_jsonl
@@ -197,8 +189,6 @@ EXPERIMENT_NAMES = ("main", "sweep", "grid", "pooled", "ablation", "sensitivity"
 
 
 def _estimate_effects(bench, args) -> dict:
-    """Measure the modelled effects of the agent's turns and, with
-    ``--effects-out``, save them for ``--effects``."""
     from .eval.effects import estimate
     eff = estimate(bench, budgets=args.budgets, runs=args.runs)
     if getattr(args, "effects_out", None):
@@ -217,7 +207,6 @@ def cmd_report(args) -> None:
     print(report.render_file(args.path))
 
 
-# --------------------------------------------------------------------------- #
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="budgetsql",
                                 description="Budget-constrained agentic planning "

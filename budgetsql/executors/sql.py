@@ -1,10 +1,3 @@
-"""Executing candidate SQL and scoring it.
-
-A candidate is correct when its result set matches the reference query's, which
-is the execution accuracy the benchmarks use.  Execution runs read-only and
-under a timeout, and reports the status the world model reads: a valid result
-with a row-count bucket, an empty result, or an error.
-"""
 from __future__ import annotations
 
 import sqlite3
@@ -60,7 +53,6 @@ def execute(db_path: str, sql: str, timeout: float = 10.0,
 
 
 def result_key(rows: list | None) -> tuple:
-    """An order-insensitive key for a result set."""
     if rows is None:
         return ("error",)
     return tuple(sorted(tuple(map(_norm, r)) for r in rows))

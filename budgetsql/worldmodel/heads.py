@@ -1,15 +1,3 @@
-"""Gradient-boosted heads for one stage type.
-
-Each stage type gets three heads: a multi-class head for what the stage will
-observe, a head for the answer held after it (correctness at the first
-answer-producing stage, a fix-and-regression head at a stage that can replace
-the answer), and one squared-loss regressor per budget dimension.
-
-The observation heads are trained conditioned on whether the held answer is
-correct.  A stage that only observes is then exactly neutral: averaged over its
-observations, the posterior correctness it implies is the prior again, so the
-allocation cannot buy accuracy from observing alone.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -24,8 +12,6 @@ EPS = 1e-9
 
 
 def head_key(stage: Stage) -> str:
-    """Heads are shared by stage type; stages of one type whose observation
-    alphabets differ (one sample or three) get their own alphabet."""
     return f"{stage.kind}/{len(stage.observations())}"
 
 
@@ -64,7 +50,6 @@ class _Classifier:
         if self.model is None:
             out = np.tile(self.prior, (n, 1))
         else:
-            # rare classes keep their pooled frequency; the trees share the rest
             rare_mass = float(self.prior[self.rare].sum())
             out = np.zeros((n, len(self.labels)))
             out[:, self.rare] = self.prior[self.rare]

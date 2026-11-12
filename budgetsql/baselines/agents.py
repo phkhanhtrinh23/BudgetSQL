@@ -1,18 +1,3 @@
-"""Agent baselines: the same agent, tools and meter without the world model.
-
-``AgentNoWorldModel`` keeps a budget tracker that reports what is left after
-every call, and estimates success and cost from stage averages rather than per
-question.  ``AgentDryRuns`` first runs each candidate workflow on a sample of
-the batch, pays for the sample, and plans with the averages it measured.
-``ProfiledPerRequest`` drops the batch allocation as well and plans each request
-on its own share from the same averages.
-
-The two agents are replayed directly: their turns are taken (``agent_mode =
-"live"``), and, as for BudgetSQL, one agent serves the whole batch with its
-turns charged to the budget groups in proportion to their questions
-(``run_agent_batch``).  On BIRD the table reports a row derived from this
-replay (``budgetsql.eval.experiments.derived_agent_rows``).
-"""
 from __future__ import annotations
 
 import random
@@ -34,9 +19,6 @@ from .adaptive import VineLMStyle
 
 
 def averages_only(cfg: PlannerConfig) -> PlannerConfig:
-    """A world model stripped of its inputs predicts one average per stage and
-    observation, which is what a planner has without one.  The agent's turns
-    are taken, and the planner paces like every other baseline."""
     return cfg.with_(use_question_features=False, use_execution_features=False,
                      use_stacking=False, use_select=False, agent_mode="live",
                      pacing=True)
@@ -44,8 +26,6 @@ def averages_only(cfg: PlannerConfig) -> PlannerConfig:
 
 def run_agent_batch(methods: list, groups: list[tuple[list, np.ndarray, Meter]]
                     ) -> list[RunResult]:
-    """Run an agent baseline over a batch: one planner per budget group, one
-    agent and one digest for the batch."""
     planners = [m.planner_for(metas, budget, meter)
                 for m, (metas, budget, meter) in zip(methods, groups)]
     batch = BatchPlanner(planners, planners[0].cfg, methods[0].agent_factory())
@@ -105,8 +85,6 @@ class AgentDryRuns(Method):
         return self
 
     def planner_for(self, metas, budget, meter) -> BudgetSQL:
-        """Pay for the dry runs on this group's meter, correct the cost
-        estimates with what they measured, and plan with the result."""
         from ..planner.execute import ExecutionContext
 
         model = self.model.clone(self._cfg.with_(online_cost_updates=True))

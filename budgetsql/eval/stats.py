@@ -1,18 +1,3 @@
-"""Statistics for comparing two methods on the same questions.
-
-Methods are run on the same question orders and replay the same recorded
-outcomes, so their runs are paired.  A comparison's gain on a unit (a database,
-or a fold of databases) is the mean over the paired runs of the difference in
-accuracy on that unit, and the mean lead weights units by their questions.  A
-lead's standard error adds the bootstrap variance over units and the variance
-of the modelled effects, and its interval uses Student's t on the
-units.  A contrast between two arms of the same method (ablation, online) uses
-the paired standard error, plus the effects' variance when only one arm
-carries them.
-
-A run maps each question to its correctness; a relaxation (the oracle) maps it
-to a fractional value in [0, 1].
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,7 +7,6 @@ from scipy import stats as sps
 
 
 def t_quantile(units: int, level: float = 0.95) -> float:
-    """The two-sided quantile of Student's t on ``units`` units."""
     df = max(1, units - 1)
     return float(sps.t.ppf(0.5 + level / 2.0, df))
 
@@ -64,8 +48,6 @@ def bootstrap_units(gains: dict[str, float], weights: dict[str, float],
 
 
 def paired_se(differ: float, n: int) -> float:
-    """The paired standard error of a gain when the two methods differ on a
-    ``differ`` share of the questions."""
     if n <= 0:
         return 0.0
     return float(np.sqrt(max(0.0, differ) / n))
@@ -78,14 +60,6 @@ def _v(x) -> float:
 def lead(a_runs: list[dict[str, bool]], b_runs: list[dict[str, bool]],
          unit_of: dict[str, str], resamples: int = 4000, seed: int = 0,
          offset: float = 0.0, offset_var: float = 0.0) -> Lead:
-    """The lead of ``a`` over ``b`` in accuracy points.
-
-    Each element of ``a_runs``/``b_runs`` maps a question to whether that run
-    answered it correctly.  ``offset`` (points) and ``offset_var`` (points
-    squared) are the modelled effects ``a`` carries beyond its replay minus
-    those ``b`` carries; the offset shifts every unit's gain and its variance
-    enters the standard error.
-    """
     assert len(a_runs) == len(b_runs) and a_runs, "runs must be paired"
     qids = sorted(set(unit_of))
     units = sorted(set(unit_of.values()))
@@ -115,8 +89,6 @@ def lead(a_runs: list[dict[str, bool]], b_runs: list[dict[str, bool]],
 
 
 def accuracy(runs: list[dict[str, bool]], offset: float = 0.0) -> tuple[float, float]:
-    """Mean accuracy in points over the runs, with its spread; ``offset`` adds
-    a modelled effect in points."""
     means = [100.0 * np.mean([_v(v) for v in r.values()]) for r in runs if r]
     if not means:
         return 0.0, 0.0
@@ -125,9 +97,6 @@ def accuracy(runs: list[dict[str, bool]], offset: float = 0.0) -> tuple[float, f
 
 def paired_contrast(a_runs: list[dict[str, bool]], b_runs: list[dict[str, bool]],
                     offset: float = 0.0, offset_var: float = 0.0) -> Lead:
-    """A contrast between two arms of the same method on the same units and
-    orders, which uses the paired standard error alone, plus the variance of
-    the modelled effects that differ between the arms."""
     qids = sorted(set().union(*[set(r) for r in a_runs + b_runs]))
     diffs, differ = [], 0.0
     for ra, rb in zip(a_runs, b_runs):

@@ -1,17 +1,12 @@
-"""Reading a SQLite schema and pruning it for the generator.
-
-Pruning is a per-question decision, not a preprocessing step: it removes a large
-share of the generator's prompt tokens and it fails on the questions whose
-needed columns it drops, so which level to use is left to the plan.
-"""
 from __future__ import annotations
 
 import re
 import sqlite3
 from dataclasses import dataclass, field
 
-#: How much of each table's column list survives at each level.
-LEVELS = {"full": 1.0, "prune1": 0.52, "prune2": 0.33}
+from ..grammar import CTX_KEEP_SHARE
+
+LEVELS = CTX_KEEP_SHARE
 
 
 @dataclass
@@ -67,12 +62,6 @@ def _tokens(text: str) -> set[str]:
 
 def prune(schema: Schema, question: str, evidence: str = "",
           level: str = "prune1") -> Schema:
-    """Keep the tables and columns most similar to the question and evidence.
-
-    A table's score is how many of its name's and its columns' words the
-    question uses; the highest-scoring tables are kept whole, the rest keep only
-    their key-looking and matching columns.
-    """
     if level == "full" or level not in LEVELS:
         return schema
     want = _tokens(question) | _tokens(evidence)
@@ -105,7 +94,6 @@ def prune(schema: Schema, question: str, evidence: str = "",
 
 
 def render(schema: Schema, sample_rows: int = 0) -> str:
-    """The schema as the generator reads it."""
     parts = []
     for t, cols in schema.tables.items():
         cols_txt = ", ".join(f"{c.name} {c.type}".strip() for c in cols)

@@ -1,12 +1,3 @@
-"""The stage-level world model: what a stage would observe, what it would do to
-the held answer, and what it would cost --- all without calling an LLM.
-
-Predictions are made per stage, so any composition the agent proposes can be
-evaluated by rolling its decision tree out, including compositions no training
-question ran as a whole.  Rollouts are batched: a planner asks for many
-questions at once, the model groups the rows it needs by head and evaluates each
-head once.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -88,8 +79,6 @@ class ResolvedStage:
         return self.labels.index(obs)
 
     def s_given(self, j: int, keep: bool) -> float:
-        """The held answer's correctness after observation ``j`` when the new
-        answer is kept or rejected, whatever Select would have decided."""
         return float((self.s_kept if keep else self.s_rejected)[j])
 
 
@@ -120,14 +109,9 @@ class StageWorldModel:
         self._kappa: dict[tuple[str, str, int], float] = {}
         self._cost_obs: dict[tuple[str, str, int], tuple[float, float]] = {}
         self._logit_shift: dict[str, float] = {}
-        #: training means of a stage's observables given its observation,
-        #: imputed into the states a rollout imagines
         self._imputed: dict[tuple, _Values] = {}
         self._diff_mask = differential_mask()
 
-    # ------------------------------------------------------------------ #
-    # training
-    # ------------------------------------------------------------------ #
     def fit(self, corpus: TraceCorpus, train_dbs: list[str] | None = None) -> "StageWorldModel":
         self.train_dbs = sorted(train_dbs if train_dbs is not None else corpus.dbs)
         rows = corpus.training_rows(self.train_dbs)
@@ -145,7 +129,6 @@ class StageWorldModel:
         self._imputed = {k: _Values(*np.mean(v, axis=0)) for k, v in acc.items()}
 
     def imputed(self, stage: Stage, obs: str) -> "_Values":
-        """The observables a rollout imputes to a stage that observed ``obs``."""
         return (self._imputed.get((stage.id, obs))
                 or self._imputed.get((stage.kind, obs))
                 or _Values(float(max(1, stage.samples)) if stage.kind == "generate" else 1.0,
@@ -153,7 +136,6 @@ class StageWorldModel:
 
     def child(self, state: State, stage: Stage, obs: str, keep: bool = True,
               meta: QuestionMeta | None = None) -> State:
-        """An imagined successor state, with imputed observables."""
         return state.append(stage, obs, keep=keep, values=self.imputed(stage, obs))
 
     def _fit_rows(self, rows: list[TrainingRow]) -> None:
@@ -219,11 +201,6 @@ class StageWorldModel:
         return X[:, keep]
 
     def clone(self, cfg: PlannerConfig | None = None) -> "StageWorldModel":
-        """A second view of the same fitted heads with its own online state.
-
-        Two arms of an experiment must not share cost corrections, and two
-        planners alive at once must not share a configuration.
-        """
         out = StageWorldModel(cfg or self.cfg)
         out.heads = self.heads
         out.train_dbs = self.train_dbs
@@ -231,9 +208,6 @@ class StageWorldModel:
         out._cache = self._cache
         return out
 
-    # ------------------------------------------------------------------ #
-    # prediction
-    # ------------------------------------------------------------------ #
     def predict(self, meta: QuestionMeta, state: State, stage: Stage) -> StagePrediction:
         key = _cache_key(meta, state, stage)
         got = self._cache.get(key)
@@ -243,9 +217,6 @@ class StageWorldModel:
         return self._scaled(got, meta, stage)
 
     def predict_raw(self, meta: QuestionMeta, state: State, stage: Stage) -> StagePrediction:
-        """The heads' prediction before this batch's online corrections: the
-        uncorrected mu-hat that the cost ratio kappa compares realised costs
-        against."""
         key = _cache_key(meta, state, stage)
         got = self._cache.get(key)
         if got is None:
@@ -254,7 +225,6 @@ class StageWorldModel:
         return got
 
     def predict_batch(self, items: list[tuple[QuestionMeta, State, Stage]]) -> None:
-        """Fill the cache for many (state, stage) pairs with one pass per head."""
         todo: dict[str, list[tuple[tuple, QuestionMeta, State, Stage]]] = {}
         for meta, state, stage in items:
             key = _cache_key(meta, state, stage)
@@ -304,8 +274,6 @@ class StageWorldModel:
 
     def _scaled(self, pred: StagePrediction, meta: QuestionMeta,
                 stage: Stage) -> StagePrediction:
-        """Apply this database's online cost corrections and, where a batch has
-        been recalibrated, the shift of its correctness predictions."""
         shift = self._logit_shift.get(meta.db, 0.0)
         scale = np.ones(D)
         if self.cfg.online_cost_updates:
@@ -319,19 +287,8 @@ class StageWorldModel:
                                pred.mu * scale, pred.var * scale ** 2,
                                pred.uncertain)
 
-    # ------------------------------------------------------------------ #
-    # within-batch recalibration
-    # ------------------------------------------------------------------ #
     def recalibrate(self, db: str, items: list[tuple[QuestionMeta, State]],
                     grid: int = 101) -> float:
-        """Fit this database's share of correct answers from what its first
-        stages observed, and shift the correctness predictions to match it.
-
-        Each stage's observation distribution is stored conditioned on the held
-        answer's correctness, so the observed shares of execution errors, empty
-        results and agreement identify the share correct without any reference
-        label.
-        """
         pi = self.estimate_accuracy(items, grid)
         if pi is None:
             return 0.0
@@ -339,7 +296,6 @@ class StageWorldModel:
 
     def calibrate_to(self, db: str, items: list[tuple[QuestionMeta, State]],
                      target: float) -> float:
-        """Shift this database's correctness predictions onto a known share."""
         if not items:
             return 0.0
         s_now = float(np.mean(self.s_of_many(items)))
@@ -350,7 +306,6 @@ class StageWorldModel:
 
     def estimate_accuracy(self, items: list[tuple[QuestionMeta, State]],
                           grid: int = 101) -> float | None:
-        """The share of correct answers the observed observations imply."""
         rows = []
         for meta, state in items:
             if not state.history:
@@ -371,13 +326,7 @@ class StageWorldModel:
         like = np.log(np.maximum(np.outer(pis, pc) + np.outer(1.0 - pis, pw), EPS))
         return float(pis[int(np.argmax(like.sum(axis=1)))])
 
-    # ------------------------------------------------------------------ #
-    # the held answer
-    # ------------------------------------------------------------------ #
     def s_of_state(self, meta: QuestionMeta, state: State) -> float:
-        """Predicted correctness of the answer held in a state, obtained by
-        replaying the state's own observations through the same arithmetic the
-        rollouts use."""
         s = 0.0
         walk = State()
         for i, (stage, obs) in enumerate(state.history):
@@ -392,8 +341,6 @@ class StageWorldModel:
         return s
 
     def s_of_many(self, items: list[tuple[QuestionMeta, State]]) -> list[float]:
-        """The same for many states at once, one batch of head evaluations per
-        depth rather than one per stage."""
         s = [0.0] * len(items)
         walk = [State() for _ in items]
         depth = max((len(st) for _, st in items), default=0)
@@ -418,7 +365,6 @@ class StageWorldModel:
 
     def select(self, meta: QuestionMeta, state: State, stage: Stage, obs: str,
                s_held: float) -> bool:
-        """Keep the new answer only where a fix is likelier than a regression."""
         res = self.predict(meta, state, stage).resolve(s_held)
         try:
             j = res.index(obs)
@@ -426,16 +372,12 @@ class StageWorldModel:
             return True
         return bool(res.keep_new[j])
 
-    # ------------------------------------------------------------------ #
-    # rollouts
-    # ------------------------------------------------------------------ #
     def rollout(self, meta: QuestionMeta, state: State, wf: Workflow,
                 s_held: float | None = None) -> Rollout:
         return self.rollout_many([(meta, state, wf)], [s_held] if s_held is not None else None)[0]
 
     def rollout_many(self, items: list[tuple[QuestionMeta, State, Workflow]],
                      s_held: list[float] | None = None) -> list[Rollout]:
-        """Roll out many continuations, batching every head evaluation."""
         needed: list[tuple[QuestionMeta, State, Stage]] = []
         for meta, state, wf in items:
             _collect(self, meta, state, wf, needed)
@@ -465,7 +407,6 @@ class StageWorldModel:
             w = float(res.p_obs[j])
             if w <= 0.0:
                 continue
-            # the branch continues from the answer Select holds
             keep = bool(res.keep_new[j]) if self.cfg.use_select else True
             sub = self._eval(meta, self.child(state, stage, obs, keep),
                              wf.child(obs), res.s_given(j, keep))
@@ -481,23 +422,11 @@ class StageWorldModel:
         return Rollout(float(np.clip(p, 0.0, 1.0)), cost, var, worst, unc, spread)
 
     def _worst_case(self, meta: QuestionMeta, state: State, stage: Stage) -> np.ndarray:
-        """The meter's worst case for one stage at the workload's limits, the
-        range c-bar that the Bernstein reserve reads."""
         ctx = stage.ctx if stage.kind == "generate" else state.ctx
         return stage_worst_case(stage, float(meta.prompt_at(ctx)), self.cfg.limits)
 
-    # ------------------------------------------------------------------ #
-    # online cost updates
-    # ------------------------------------------------------------------ #
     def observe_cost(self, db: str, stage: Stage, predicted: np.ndarray,
                      realized: np.ndarray, completed: bool = True) -> None:
-        """A completed call reveals its exact cost.  Cancelled calls are
-        censored: what they were charged is not the cost of a completed call.
-
-        ``predicted`` must be the heads' own prediction mu-hat, before any
-        correction (``predict_raw``): kappa is the ratio of realised
-        to uncorrected predicted cost, and feeding it corrected predictions
-        would make it converge to the square root of the true ratio."""
         if not completed or not self.cfg.online_cost_updates:
             return
         hk = head_key(stage)
@@ -528,8 +457,6 @@ def _collect(model: "StageWorldModel", meta: QuestionMeta, state: State, wf: Wor
     if wf.is_stop:
         return
     out.append((meta, state, wf.stage))
-    # Select's decision is only known once the rollout runs, so a replacing
-    # stage's children are collected under both
     keeps = (True, False) if wf.stage.kind in REPLACING and state.has_answer else (True,)
     for obs in wf.stage.observations():
         if wf.child(obs).is_stop:
@@ -549,9 +476,6 @@ class _Values:
 
 
 def _cache_key(meta: QuestionMeta, state: State, stage: Stage) -> tuple:
-    """A prediction depends on the branch and on the held answer's observables,
-    so a prediction made with imputed observables is never reused for a state
-    whose observables were measured."""
     return (meta.qid, state.key, state.observables, stage.id)
 
 
@@ -562,7 +486,6 @@ def _shifted(s: float, shift: float) -> float:
 
 
 def _shift_to(s_now: float, target: float) -> float:
-    """The shift in log-odds that moves ``s_now`` onto ``target``."""
     a = float(np.clip(s_now, EPS, 1.0 - EPS))
     b = float(np.clip(target, EPS, 1.0 - EPS))
     return float(np.log(b / (1.0 - b)) - np.log(a / (1.0 - a)))

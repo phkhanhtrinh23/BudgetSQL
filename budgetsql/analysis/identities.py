@@ -1,9 +1,3 @@
-"""Exact checks of the algebra the analysis rests on.
-
-Each check is run in exact rational arithmetic over finite weighted traces or
-finite grids, so a failure is a real failure and not a rounding artefact.  They
-double as regression tests for the estimators in this package.
-"""
 from __future__ import annotations
 
 import math
@@ -31,7 +25,6 @@ def rates(trace: Trace) -> tuple[F, F]:
 
 
 def gain_over_random(trace: Trace) -> F:
-    """Covariance form of a rule's gain over escalating at random."""
     mean_s = sum(w * s for w, _, _, s in trace)
     fix = [(w, F(1) if (a == 0 and b == 1) else F(0), s) for w, a, b, s in trace]
     reg = [(w, F(1) if (a == 1 and b == 0) else F(0), s) for w, a, b, s in trace]
@@ -51,7 +44,6 @@ def youden(trace: Trace, event) -> F | None:
 
 
 def check_identity(trace: Trace) -> bool:
-    """gamma(s) = f(1-f) J_fix - r(1-r) J_regression."""
     f, r = rates(trace)
     jf = youden(trace, lambda a, b: a == 0 and b == 1)
     jr = youden(trace, lambda a, b: a == 1 and b == 0)
@@ -65,8 +57,6 @@ def check_identity(trace: Trace) -> bool:
 
 
 def check_ceiling(trace: Trace) -> bool:
-    """No rule gains more than f(1-m+) over the best budget-matched mixture,
-    and escalating exactly the fixes attains it."""
     f, r = rates(trace)
     m = f - r
     ceiling = f * (1 - max(m, F(0)))
@@ -82,17 +72,12 @@ def check_ceiling(trace: Trace) -> bool:
 
 
 def check_regression_only_example() -> bool:
-    """Two equally weighted questions, one a regression and one unaffected:
-    escalating only the unaffected one gains a quarter over random escalation
-    without any fix at all."""
     trace: Trace = [(F(1, 2), 1, 0, F(0)), (F(1, 2), 1, 1, F(1))]
     return gain_over_random(trace) == F(1, 4)
 
 
 def check_detector_operating_point(p_keep: F, u: F, v: F, alpha: F,
                                    alpha_prime: F) -> bool:
-    """A signal independent of the escalation's answer given the first one's
-    gains p(1-p)(u + 1 - v)(alpha - alpha')."""
     rows: Trace = [
         (p_keep * v, 1, 1, alpha_prime),
         (p_keep * (1 - v), 1, 0, alpha_prime),
@@ -104,8 +89,6 @@ def check_detector_operating_point(p_keep: F, u: F, v: F, alpha: F,
 
 
 def check_information_term(n: int = 40, rng: random.Random | None = None) -> bool:
-    """For two candidates, the per-question information gain is the smaller of
-    the total positive and the total negative priced advantage."""
     rng = rng or random.Random(1)
     x = [F(rng.randint(-9, 9), 7) for _ in range(n)]
     gamma = (sum(max(v, F(0)) for v in x) - max(sum(v for v in x), F(0))) / n
@@ -115,8 +98,6 @@ def check_information_term(n: int = 40, rng: random.Random | None = None) -> boo
 
 def check_common_mode(skill_keep: float, skill_escalate: float,
                       grid: int = 400) -> dict:
-    """Under a one-parameter difficulty model the escalation value keeps the
-    sign of the skill gap in every state and never exceeds tanh(gap/4)."""
     ell = math.tanh(abs(skill_escalate - skill_keep) / 4.0)
     sign = 1 if skill_escalate > skill_keep else (-1 if skill_escalate < skill_keep else 0)
     worst = 0.0
@@ -134,7 +115,6 @@ def check_common_mode(skill_keep: float, skill_escalate: float,
 
 
 def run_all(seeds: int = 25) -> dict:
-    """Run every check and report what passed."""
     out: dict[str, bool | dict] = {}
     ok_identity = ok_ceiling = True
     for s in range(seeds):

@@ -1,10 +1,3 @@
-"""The stage grammar, question states and workflows composed from it.
-
-A workflow is a decision tree over stages whose branches are the observations of
-``execute`` and ``verify``.  The grammar, not a fixed list, defines what a
-deployment can run; a workflow calls an LLM at most ``MAX_LLM_CALLS`` times on
-any branch.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -14,16 +7,13 @@ from .config import TIERS
 
 MAX_LLM_CALLS = 4
 
-#: Context levels: the full schema, or a schema pruned by retrieval at two levels.
 CTX_LEVELS: tuple[str, ...] = ("full", "prune1", "prune2")
 
-#: Observation alphabets. ``execute`` reports the execution status with a
-#: row-count bucket and, for several samples, the agreement among them.
+CTX_KEEP_SHARE: dict[str, float] = {"full": 1.0, "prune1": 0.52, "prune2": 0.33}
+
 EXEC_STATUS: tuple[str, ...] = ("valid.one", "valid.many", "empty", "error")
 AGREEMENT: tuple[str, ...] = ("agree", "split")
 VERIFY_OBS: tuple[str, ...] = ("accept", "doubt")
-#: A replacing stage observes the new answer's execution and its agreement with
-#: the held answer.
 REPLACE_OBS: tuple[str, ...] = ("valid.match", "valid.diff", "empty", "error")
 
 OBSERVE_ONLY = ("execute", "verify")
@@ -69,14 +59,10 @@ class Stage:
             return REPLACE_OBS
         return ("ok",)
 
-    def __str__(self) -> str:  # pragma: no cover - display only
+    def __str__(self) -> str:
         return self.id
 
 
-# --------------------------------------------------------------------------- #
-# states
-# --------------------------------------------------------------------------- #
-#: Marks, in a branch key, a replacing stage whose new answer Select rejected.
 REJECTED = "~rejected"
 
 
@@ -93,9 +79,6 @@ class Observables:
     earlier_equal: float = 0.0
 
     def after(self, stage: "Stage", kept: bool, values) -> "Observables":
-        """The observables once ``stage`` ran and returned ``values`` (any
-        object with ``n_distinct``, ``completion_tokens`` and
-        ``equal_to_held``), with Select's decision ``kept``."""
         if values is None:
             return self
         nd = float(getattr(values, "n_distinct", 1.0))
@@ -107,10 +90,7 @@ class Observables:
             return Observables(nd, self.completion_tokens, self.earlier_equal)
         if stage.kind in REPLACING:
             if kept:
-                # the answer it replaced, and those that agreed with it, now
-                # agree with the new one exactly when the two are equal
                 return Observables(nd, comp, (self.earlier_equal + 1.0) * eq)
-            # a rejected answer is one more answer the held one is compared to
             return Observables(self.n_distinct, self.completion_tokens,
                                self.earlier_equal + eq)
         return self
@@ -134,11 +114,8 @@ class State:
     answer_stage: Stage | None = None
     answer_obs: str | None = None
     n_answers: int = 0
-    #: history indices of replacing stages whose answer Select rejected
     rejected: tuple[int, ...] = ()
-    #: history index of the stage that produced the held answer
     answer_index: int = -1
-    #: the observables after each stage, so a prefix can be replayed exactly
     trail: tuple[Observables, ...] = ()
 
     @property
@@ -147,10 +124,6 @@ class State:
 
     def append(self, stage: Stage, obs: str, keep: bool = True, values=None,
                observables: Observables | None = None) -> "State":
-        """The state after ``stage`` observed ``obs``.  For a replacing stage,
-        ``keep`` is Select's decision on its new answer.  ``values`` is what the
-        stage returned (a trace outcome, or the imputed means of a rollout);
-        ``observables`` sets the result directly, as a replay does."""
         i = len(self.history)
         hist = self.history + ((stage, obs),)
         ctx = stage.ctx if stage.kind == "context" else self.ctx
@@ -166,19 +139,15 @@ class State:
                          self.n_answers + 1, self.rejected + (i,), self.answer_index,
                          trail)
         if stage.kind == "execute" and self.answer_stage is not None:
-            # execution is what reveals the held answer's status
             return State(hist, ctx, self.answer_stage, obs, self.n_answers,
                          self.rejected, self.answer_index, trail)
         return State(hist, ctx, self.answer_stage, self.answer_obs, self.n_answers,
                      self.rejected, self.answer_index, trail)
 
     def kept(self, i: int) -> bool:
-        """Whether the answer of the ``i``-th stage was kept by Select."""
         return i not in self.rejected
 
     def replay(self, upto: int | None = None) -> "State":
-        """The state after the first ``upto`` stages, with the same decisions
-        and the same observables."""
         out = State()
         for i, (stage, obs) in enumerate(self.history[:upto]):
             out = out.append(stage, obs, keep=self.kept(i),
@@ -186,10 +155,8 @@ class State:
         return out
 
     def before_last(self) -> "State":
-        """The state as it stood before the last stage ran."""
         return self.replay(len(self.history) - 1)
 
-    # ---- bookkeeping the grammar needs ----
     @property
     def llm_calls(self) -> int:
         return sum(s.llm_calls for s, _ in self.history)
@@ -204,7 +171,6 @@ class State:
 
     @property
     def executed(self) -> bool:
-        """Whether the held answer has been executed."""
         return self.answer_obs is not None and (
             self.answer_stage is not None
             and (self.answer_stage.kind in REPLACING or any(
@@ -219,7 +185,6 @@ class State:
 
     @property
     def key(self) -> tuple[tuple[str, str], ...]:
-        """Branch key into the trace corpus; a rejected answer is marked."""
         return tuple((s.id, o if i not in self.rejected else o + REJECTED)
                      for i, (s, o) in enumerate(self.history))
 
@@ -227,9 +192,6 @@ class State:
         return len(self.history)
 
 
-# --------------------------------------------------------------------------- #
-# workflows
-# --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class Workflow:
     """A decision tree over stages.  ``children`` maps an observation of
@@ -249,8 +211,6 @@ class Workflow:
         return nxt if nxt is not None else STOP
 
     def stages(self) -> Iterable[Stage]:
-        """Every stage of the tree once, in the order it can first run.  A
-        sub-workflow shared by several observations is listed once."""
         seen: set[int] = set()
         stack = [self]
         while stack:
@@ -275,7 +235,7 @@ class Workflow:
     def rename(self, name: str) -> "Workflow":
         return replace(self, name=name)
 
-    def __str__(self) -> str:  # pragma: no cover - display only
+    def __str__(self) -> str:
         return self.name or (self.stage.id if self.stage else "stop")
 
 
@@ -283,7 +243,6 @@ STOP = Workflow(name="stop")
 
 
 def seq(*stages: Stage, name: str = "") -> Workflow:
-    """A workflow that runs the stages in order, on every observation."""
     node: Workflow | None = None
     for st in reversed(stages):
         node = Workflow(st, {o: node for o in st.observations()})
@@ -319,9 +278,6 @@ def context(level: str) -> Stage:
     return Stage("context", None, 1, level)
 
 
-# --------------------------------------------------------------------------- #
-# the grammar
-# --------------------------------------------------------------------------- #
 class Grammar:
     """Which stages may follow a state, and which workflows that admits."""
 
@@ -337,7 +293,6 @@ class Grammar:
         self.cap = cap
         self._rank = {t: i for i, t in enumerate(tiers)}
 
-    # ---- legal next stages ----
     def actions(self, state: State) -> list[Stage]:
         out: list[Stage] = []
         left = self.max_llm_calls - state.llm_calls
@@ -383,7 +338,6 @@ class Grammar:
         return wf.max_llm_calls() <= self.max_llm_calls
 
     def one_stage_edits(self, state: State, wf: Workflow) -> list[Workflow]:
-        """One tier up or down, one stage added or removed."""
         out: list[Workflow] = []
         if not wf.is_stop:
             out.append(STOP)
@@ -415,7 +369,6 @@ class Grammar:
 
 
 def token(stage: Stage) -> str:
-    """A stage in the agent's compact syntax (``parse_stage`` reads it back)."""
     if stage.kind == "context":
         return f"ctx:{stage.ctx}"
     if stage.kind == "execute":
@@ -429,9 +382,6 @@ def token(stage: Stage) -> str:
 
 
 def compact(wf: Workflow) -> str:
-    """A short text for a workflow: a chain ``ver:M,esc:L`` when every
-    observation continues the same way, otherwise the branches that continue,
-    ``exec[error>rep:L;empty>rep:L]``."""
     if wf.is_stop:
         return "stop"
     subs = {o: wf.child(o) for o in wf.stage.observations()}
@@ -445,8 +395,6 @@ def compact(wf: Workflow) -> str:
 
 
 def single_call_first(wf: Workflow) -> bool:
-    """Whether a composition's first call is a single call; a Context stage
-    before it calls nothing."""
     node = wf
     while node is not None and not node.is_stop:
         if node.stage.llm_calls:
@@ -456,27 +404,17 @@ def single_call_first(wf: Workflow) -> bool:
 
 
 def shape(wf: Workflow) -> str:
-    """A canonical string for a workflow, used to de-duplicate candidates."""
     if wf.is_stop:
         return "."
     inner = ",".join(f"{o}>{shape(wf.child(o))}" for o in wf.stage.observations())
     return f"{wf.stage.id}({inner})"
 
 
-# --------------------------------------------------------------------------- #
-# a library of reference workflows
-# --------------------------------------------------------------------------- #
 def _after(stage: Stage, sub: Workflow | None) -> Workflow:
-    """Run ``stage``, then ``sub`` whatever it observes."""
     return Workflow(stage, {o: sub for o in stage.observations()})
 
 
 def _with_repair(tier: str, rep: str, name: str) -> Workflow:
-    """One call of ``tier``, repaired by ``rep`` on an error or an empty result.
-
-    The repair stage observes its own answer's execution, so no separate
-    execution follows it.
-    """
     fix = seq(repair(rep))
     e = Workflow(execute(1), {"empty": fix, "error": fix})
     return _after(gen(tier), e).rename(name)
@@ -487,7 +425,6 @@ def _vote(tier: str, name: str) -> Workflow:
 
 
 def _cascade(low: str, high: str, name: str) -> Workflow:
-    """Three samples of ``low``, then ``high`` when the samples split."""
     esc = seq(escalate(high))
     e = execute(3)
     e_node = Workflow(e, {o: (esc if o.endswith("split") else None) for o in e.observations()})
@@ -495,9 +432,6 @@ def _cascade(low: str, high: str, name: str) -> Workflow:
 
 
 def reference_library() -> dict[str, Workflow]:
-    """Named workflows that are useful on their own and as a starting point for
-    the agent: single calls, repairs, votes, cascades, a compressed context and
-    a verified escalation."""
     lib: dict[str, Workflow] = {}
     for t in TIERS:
         lib[t] = seq(gen(t), execute(1), name=t)
@@ -530,12 +464,7 @@ LIBRARY_ORDER = ["S", "M", "L", "S+R", "M+R", "L+R", "S+R_L", "M+R_L",
                  "Sx3", "Mx3", "S->M", "S->L", "M->L", "M_c", "M_c+R_L", "M->V->L"]
 
 
-# --------------------------------------------------------------------------- #
-# a compact text form for composing workflows
-# --------------------------------------------------------------------------- #
 def parse_stage(token: str) -> Stage:
-    """``gen:M``, ``gen:Mx3``, ``gen:M@prune1``, ``exec``, ``exec:3``,
-    ``rep:L``, ``ver:M``, ``esc:L``, ``ctx:prune1``."""
     token = token.strip()
     kind, _, rest = token.partition(":")
     kind = {"gen": "generate", "exec": "execute", "rep": "repair",
@@ -565,7 +494,6 @@ def parse_stage(token: str) -> Stage:
 
 
 def parse_chain(spec: str) -> Workflow:
-    """A comma-separated chain of stages, run in order whatever each observes."""
     stages = [parse_stage(t) for t in spec.split(",") if t.strip()]
     if not stages:
         return STOP
@@ -573,7 +501,6 @@ def parse_chain(spec: str) -> Workflow:
 
 
 def _split_top(text: str, sep: str) -> list[str]:
-    """Split at ``sep`` outside brackets."""
     parts, depth, cur = [], 0, []
     for ch in text:
         if ch == "[":
@@ -590,9 +517,6 @@ def _split_top(text: str, sep: str) -> list[str]:
 
 
 def parse_workflow(text: str) -> Workflow:
-    """Read the compact syntax ``compact`` writes: a chain ``ver:M,esc:L``, or
-    a stage whose observations continue differently,
-    ``exec[error>rep:L;empty>rep:L]`` (observations not listed stop)."""
     text = text.strip()
     if text in ("", "stop"):
         return STOP

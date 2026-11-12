@@ -1,9 +1,5 @@
-"""Budget-constrained agentic planning for multi-stage Text-to-SQL."""
 import os as _os
 
-# The world model is many small trees rather than one big one, and small fits
-# are several times faster on one thread than on eight, so cap the BLAS and
-# OpenMP pools unless the caller has already chosen.
 for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
              "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
     _os.environ.setdefault(_var, "1")

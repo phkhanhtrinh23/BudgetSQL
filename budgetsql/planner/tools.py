@@ -1,9 +1,3 @@
-"""The tools the agent acts through.
-
-The agent decides which few candidates each cell deserves, which cells to probe
-and how much to hold back; the tools do the arithmetic, which language models do
-poorly.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -36,7 +30,7 @@ class ToolResult:
     ok: bool
     data: dict
 
-    def __str__(self) -> str:  # pragma: no cover - display only
+    def __str__(self) -> str:
         body = ", ".join(f"{k}={_fmt(v)}" for k, v in self.data.items())
         return ("ok " if self.ok else "rejected ") + body
 
@@ -62,16 +56,13 @@ class ToolBox:
         else:
             self.batch = BatchPlanner([target], target.cfg, target.agent)
         self.planners = self.batch.planners
-        #: the digest the agent is reading this turn
         self.digest = None
 
     @property
     def planner(self):
-        """The planner of a single-group batch."""
         return self.planners[0]
 
     def _members(self, cell: str) -> list[tuple[object, str]]:
-        """The (planner, planner cell) pairs a digest cell stands for."""
         members = [cell]
         digest = self.digest
         if digest is None:
@@ -89,7 +80,6 @@ class ToolBox:
                     out.append((p, m))
         return out
 
-    # ---- compose / imagine ----
     def compose(self, cell: str, spec: str) -> ToolResult:
         try:
             wf = parse_workflow(spec)
@@ -127,11 +117,7 @@ class ToolBox:
             "uncertain": any(r.uncertain for r in rolls),
         })
 
-    # ---- allocate ----
     def allocate(self, reserve: float = 0.0) -> ToolResult:
-        """Solve the allocation program in every group with the planning reserve r = rho_turn
-        held back while the agent can still be called, plus ``reserve`` (a
-        share of the money) if the agent asks."""
         value, n = 0.0, 0
         spend, duals = zeros(), zeros()
         split = 0
@@ -159,7 +145,6 @@ class ToolBox:
             "split": split,
         })
 
-    # ---- probe / run ----
     def probe(self, cell: str, stage: str, n: int = 8) -> ToolResult:
         try:
             st = parse_stage(stage)
@@ -179,7 +164,6 @@ class ToolBox:
         return ToolResult(out["probed"] > 0, out)
 
     def run(self, k: int = 25) -> ToolResult:
-        """Execute the next ``k`` planned continuations of every group."""
         from . import reserve as reserve_mod
         ran = 0
         for p in self.planners:
@@ -193,7 +177,6 @@ class ToolBox:
             return ToolResult(False, {"error": "nothing open"})
         return ToolResult(True, {"ran": ran})
 
-    # ---- dispatch for a text-driven agent ----
     def call(self, name: str, args: dict) -> ToolResult:
         fn = {"compose": self.compose, "imagine": self.imagine,
               "allocate": self.allocate, "probe": self.probe,

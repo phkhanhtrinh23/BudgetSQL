@@ -4,8 +4,6 @@ from budgetsql.grammar import State, execute, gen, parse_chain, verify
 
 
 def test_observing_does_not_change_expected_correctness(corpus, values):
-    """A stage that only observes must be neutral: averaged over what it can
-    observe, the posterior correctness it implies is the prior again."""
     model = values.model
     meta = corpus.questions_of(corpus.dbs[-1])[0]
     state = State().append(gen("M"), "ok")

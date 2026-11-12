@@ -1,4 +1,3 @@
-"""The trace corpus: a trace source plus the training rows the heads read."""
 from __future__ import annotations
 
 import random
@@ -25,7 +24,6 @@ class TrainingRow:
         return self.meta.db
 
     def features(self, use_question: bool = True, use_execution: bool = True) -> np.ndarray:
-        """``phi`` of the row's state, its observables included."""
         return phi(self.meta, self.state, use_question=use_question,
                    use_execution=use_execution)
 
@@ -49,7 +47,6 @@ class TraceCorpus:
         for m in self._questions:
             self._by_db.setdefault(m.db, []).append(m)
 
-    # ---- the workload ----
     @property
     def questions(self) -> list[QuestionMeta]:
         return self._questions
@@ -64,17 +61,9 @@ class TraceCorpus:
     def outcome(self, meta: QuestionMeta, state: State, stage: Stage) -> StageOutcome | None:
         return self.source.outcome(meta, state, stage)
 
-    # ---- branch-faithful replay of one workflow ----
     def run(self, meta: QuestionMeta, state: State, wf: Workflow,
             select=None, held: bool | None = None
             ) -> tuple[State, bool, np.ndarray, list[StageOutcome]]:
-        """Execute ``wf`` from ``state`` on the recorded branches.
-
-        ``select(state, stage, outcome)`` decides whether a replacing stage's
-        answer is kept; the default keeps it.  A rejected answer leaves the
-        earlier one held, on its own branch.  Returns the state reached, the
-        correctness of the answer held, the cost and the outcomes.
-        """
         cost = np.zeros(3)
         outs: list[StageOutcome] = []
         node = wf
@@ -97,7 +86,6 @@ class TraceCorpus:
             node = node.child(out.obs)
         return state, bool(held), cost, outs
 
-    # ---- training rows ----
     def training_rows(self, dbs: list[str] | None = None) -> list[TrainingRow]:
         rng = random.Random(self.seed)
         rows: list[TrainingRow] = []
@@ -124,7 +112,6 @@ class TraceCorpus:
                 nxt_held = out.answer_correct if stage.kind in ANSWER_PRODUCING else held
                 if seen + len(frontier) < self.max_states:
                     frontier.append((state.append(stage, out.obs, values=out), nxt_held))
-                # the branch on which Select rejected the new answer
                 if (stage.kind in REPLACING and state.has_answer
                         and seen + len(frontier) < self.max_states):
                     frontier.append((state.append(stage, out.obs, keep=False, values=out),
@@ -136,8 +123,6 @@ class TraceCorpus:
 
 
 def split_dbs(dbs: list[str], folds: int, seed: int = 0) -> list[list[str]]:
-    """Group databases into folds, used where a single database's share of the
-    budget could not pay for a top-tier call."""
     rng = random.Random(seed)
     order = list(dbs)
     rng.shuffle(order)

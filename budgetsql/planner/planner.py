@@ -1,17 +1,3 @@
-"""The planner of one budget group: plan it, run it under the meter, re-solve.
-
-A cheap first stage runs on every question, planned rather than fixed.  The
-world model then reads what each first stage returned and predicts which further
-stages would fix the held answer, which would break it, and what each would
-cost.  The allocation program splits the group's budget among the candidates,
-and its dual prices order the continuations, size the reserve and price the
-certificate.  One meter charges every call, the agent's own included.
-
-The agent is central to the batch rather than to a group: one digest covers
-every group and its turns are charged to the groups in proportion to their
-questions.  :class:`budgetsql.planner.batch.BatchPlanner` drives the groups'
-planners and holds the agent's sessions.
-"""
 from __future__ import annotations
 
 import time
@@ -34,15 +20,11 @@ from .digest import CellCandidate, Digest, DigestCell
 from .execute import ExecutionContext, first_block, pace, run_workflow
 from .meter import Meter
 
-#: The compositions the opening solve chooses a first stage from: those that
-#: begin with a single call.
 OPENING_CANDIDATES = tuple(n for n, wf in reference_library().items()
                            if n in LIBRARY_ORDER and single_call_first(wf))
 
 
 def remainder(wf: Workflow | None, state: State) -> Workflow:
-    """What is left of a composition once a question has run its stages: its
-    sub-workflow after the observed branch, or stop if the question left it."""
     node = wf or STOP
     for stage, obs in state.history:
         if node.is_stop or node.stage.id != stage.id:
@@ -64,18 +46,10 @@ class QuestionRecord:
     cell: str = ""
     opening: Workflow | None = None
     planned: Workflow | None = None
-    #: candidates the agent registered for the cell the question was in when
-    #: it registered them; cells are re-formed after every block, so the
-    #: candidates stay with the question
     registered: dict[str, Workflow] = field(default_factory=dict)
-    #: whether its cell has been flagged, so its candidates' one-stage edits
-    #: are candidates too
     edited: bool = False
-    #: the stacked value p-tilde of the last continuation it ran, when chosen
     selected_value: float | None = None
     blocked: set[str] = field(default_factory=set)
-    #: Observations of the stages run since the question joined a digest cell:
-    #: (stage id, predicted distribution, index observed).
     obs_log: list[tuple[str, np.ndarray, int]] = field(default_factory=list)
 
     @property
@@ -91,8 +65,6 @@ class QuestionRecord:
         return (self.spend - self.predicted) / p
 
     def observe(self, stage, resolved, j: int) -> None:
-        """Record what a stage observed against what was predicted, once the
-        question is in a cell; the digest flags a cell whose shares shift."""
         if self.cell and len(resolved.labels) > 1:
             self.obs_log.append((stage.id, np.asarray(resolved.p_obs, dtype=float),
                                  int(j)))
@@ -159,24 +131,16 @@ class BudgetSQL:
         self._last_alloc: Allocation | None = None
         self._predicted = 0.0
         self._t0 = 0.0
-        #: the coordinator of the batch this group belongs to, and the share of
-        #: each agent turn the group pays (its share of the batch's questions)
         self.batch = None
         self.turn_share = 1.0
 
-    # ------------------------------------------------------------------ #
-    # running a budget group
-    # ------------------------------------------------------------------ #
     def run(self, metas: list[QuestionMeta], budget: np.ndarray,
             meter: Meter | None = None) -> RunResult:
-        """Plan and run this group as a batch of its own."""
         from .batch import BatchPlanner
         return BatchPlanner([self], self.cfg, self.agent).run([(metas, budget, meter)])[0]
 
     def start(self, metas: list[QuestionMeta], budget: np.ndarray,
               meter: Meter | None = None) -> None:
-        """Solve the allocation program from h0, run the planned first stages
-        and observe them."""
         self._t0 = time.time()
         cfg = self.cfg
         self.meter = meter or Meter(budget, planning_cap=cfg.planning_cap)
@@ -194,14 +158,11 @@ class BudgetSQL:
             self._recalibrate()
 
     def resolve(self) -> Allocation | None:
-        """Re-solve the allocation program over the open questions."""
         alloc = self._solve_continuations()
         self._last_alloc = alloc
         return alloc
 
     def run_next_block(self, whole_plan: bool = False) -> bool:
-        """Run the next K planned continuations of the last solve, or its whole
-        plan; whether anything ran."""
         alloc = self._last_alloc
         if alloc is None:
             return False
@@ -233,17 +194,9 @@ class BudgetSQL:
     def is_open(self) -> bool:
         return any(not r.closed for r in self.records.values())
 
-    # ------------------------------------------------------------------ #
-    # planning
-    # ------------------------------------------------------------------ #
     def turn_worst_case(self) -> np.ndarray:
-        """What one agent turn may cost the whole batch: its prompt is the
-        digest and its completion and time are capped, so rho_turn is known
-        before the turn."""
         from .agent import PROMPT_OVERHEAD_TOKENS
         price = PRICES["agent"]
-        # the fixed part of the prompt (system, tool spec, message framing),
-        # plus the digest, whose size is capped
         prompt = float(PROMPT_OVERHEAD_TOKENS + self.cfg.digest_tokens
                        + self.cfg.agent_result_tokens)
         comp = float(self.cfg.agent_completion_tokens)
@@ -251,19 +204,14 @@ class BudgetSQL:
                          prompt + comp, float(self.cfg.agent_timeout_s)])
 
     def turn_charge(self) -> np.ndarray:
-        """This group's share of one turn's worst case."""
         return self.turn_share * self.turn_worst_case()
 
     def _planning_reserve(self) -> np.ndarray:
-        """The planning reserve r: this group's share of rho_turn, held for as
-        long as the agent can still be called."""
         if self.batch is None or self.cfg.free_turns or not self.batch.agent_available():
             return zeros()
         return self.turn_charge()
 
     def _opening_plan(self) -> Allocation:
-        """One solve from the empty state over compositions that begin with a
-        single call, scored on the question part of the state."""
         names = [n for n in OPENING_CANDIDATES if n in self.library]
         wfs = [self.library[n] for n in names]
         recs = list(self.records.values())
@@ -301,8 +249,6 @@ class BudgetSQL:
         return greedy(cands, rhs)
 
     def _run_first_stages(self, alloc: Allocation) -> None:
-        """Each question starts with the first stage of its composition in the
-        extreme point (of the larger share if split), in arrival order."""
         chosen = alloc.chosen()
         recs = list(self.records.values())
         cheap = self._cheap_cost(recs) if self.cfg.pacing else None
@@ -332,7 +278,6 @@ class BudgetSQL:
         return first_block(branch(a, {o: None for o in a.observations()}))
 
     def _cheap_cost(self, recs: list[QuestionRecord]) -> np.ndarray:
-        """The mean predicted cost of the cheapest first call."""
         blocks = [self._cheapest_block(r) for r in recs]
         items = [(r.meta, r.state, b) for r, b in zip(recs, blocks) if b is not None]
         if not items:
@@ -341,8 +286,6 @@ class BudgetSQL:
         return np.mean([r.cost for r in rolls], axis=0)
 
     def _run_whole_workflows(self, alloc: Allocation) -> None:
-        """Give every question its complete workflow from predictions made
-        before anything runs."""
         chosen = alloc.chosen()
         for rec in self.records.values():
             cand = chosen.get(rec.qid)
@@ -354,9 +297,6 @@ class BudgetSQL:
             rec.closed = True
 
     def _recalibrate(self) -> None:
-        """Within-batch recalibration: each database's share of
-        correct answers is read off its observed execution rates, and the held
-        answers are rescored."""
         by_db: dict[str, list[QuestionRecord]] = {}
         for r in self.records.values():
             if r.state.history:
@@ -368,12 +308,6 @@ class BudgetSQL:
                 r.s_held = float(s)
 
     def _scoring_state(self, rec: QuestionRecord) -> tuple[State, float]:
-        """The state a candidate is scored in.  By default this is the state the
-        question is really in.  Scoring before the first stage (an ablation)
-        replaces what each stage of the opening block returned by the
-        observation the model expected, with imputed observables, keeps the
-        rest of the history and its Select decisions, and rescores the held
-        answer from that state."""
         if not self.cfg.score_from_empty or not rec.state.history:
             return rec.state, rec.s_held
         blind, s = State(), 0.0
@@ -391,7 +325,6 @@ class BudgetSQL:
 
     @staticmethod
     def _opening_length(rec: QuestionRecord) -> int:
-        """How many stages of a question's history its opening block ran."""
         n = 0
         node = first_block(rec.opening) if rec.opening is not None else STOP
         for stage, obs in rec.state.history:
@@ -402,10 +335,6 @@ class BudgetSQL:
         return n
 
     def _candidates(self, rec: QuestionRecord) -> list[Workflow]:
-        """W_i: what a question may run next.  The rest of the composition its
-        first stage came from, the candidates the agent registered for its cell,
-        and, once its cell has been flagged, the one-stage edits of those
-        candidates.  Stop is always added by the caller."""
         base: dict[str, Workflow] = {}
         rest = remainder(rec.opening, rec.state)
         if not rest.is_stop and self.grammar.is_wellformed(rest, rec.state):
@@ -418,7 +347,6 @@ class BudgetSQL:
             for wf in list(base.values()) + [rec.planned or STOP]:
                 for edit in self.grammar.one_stage_edits(rec.state, wf):
                     out[shape(edit)] = edit
-            # a verification only pays together with what it would trigger
             for a in self.grammar.actions(rec.state):
                 if a.kind == "verify":
                     for tier in ("M", "L"):
@@ -430,8 +358,6 @@ class BudgetSQL:
         return keep[: self.cfg.max_candidates]
 
     def add_edits(self, cells: list[str]) -> None:
-        """After a flag: the candidates of the questions now in the flagged
-        cells are widened by their one-stage edits at the next solve."""
         flagged = set(cells)
         for r in self.records.values():
             if not r.closed and r.cell in flagged:
@@ -446,9 +372,6 @@ class BudgetSQL:
         scoring: list[float] = []
         for r in open_recs:
             state, s_held = self._scoring_state(r)
-            # stop is a candidate like any other, and it is valued by the same
-            # calibration, so keeping the held answer and paying for another
-            # stage are compared on one scale
             for wf in [STOP] + self._candidates(r):
                 items.append((r.meta, state, wf))
                 owners.append(r)
@@ -467,7 +390,6 @@ class BudgetSQL:
         res = reserve if reserve is not None else self._planning_reserve()
         alloc = self._solve(cands, reserve=res)
         if self.cfg.cost_reserve:
-            # the Bernstein reserve over the block planned before the next re-solve
             rho = reserve_mod.reserve_for(alloc, self.cfg.replan_block, alloc.duals,
                                           delta=self.cfg.reserve_delta,
                                           z=self.cfg.reserve_z)
@@ -493,20 +415,12 @@ class BudgetSQL:
             if report.stages:
                 rec.selected_value = float(cand.value)
             if not report.made_progress:
-                # the meter would not pay for this one.  A refused continuation
-                # waits when releasing the reservations in flight would make it
-                # fit; run one at a time, nothing is in flight, so it is
-                # removed from the candidates and the next solve chooses among
-                # what is left
                 rec.blocked.add(shape(wf))
                 rec.planned = None
                 if not self._candidates(rec):
                     rec.closed = True
         self._assign_cells()
 
-    # ------------------------------------------------------------------ #
-    # executing stages under the meter
-    # ------------------------------------------------------------------ #
     def _execute(self, rec: QuestionRecord, wf: Workflow):
         report = run_workflow(self._ctx(), rec, wf)
         if report.exhausted or not self.grammar.actions(rec.state):
@@ -517,12 +431,7 @@ class BudgetSQL:
         return ExecutionContext(self.corpus, self.meter, self.cfg, self.grammar,
                                 self.model, select=self.cfg.use_select)
 
-    # ------------------------------------------------------------------ #
-    # digest cells
-    # ------------------------------------------------------------------ #
     def _assign_cells(self) -> None:
-        """Cells by database, first-stage observation and deciles of predicted
-        success and predicted cost."""
         open_recs = [r for r in self.records.values() if not r.closed]
         if not open_recs:
             return
@@ -549,8 +458,6 @@ class BudgetSQL:
         return np.mean([r.drift() for r in recs], axis=0) if recs else zeros()
 
     def _cell_shift(self, recs: list[QuestionRecord]) -> float:
-        """The largest total-variation distance, over the stages the cell's
-        questions ran, between the observation shares seen and predicted."""
         by_stage: dict[str, tuple[np.ndarray, np.ndarray, int]] = {}
         for r in recs:
             for sid, p, j in r.obs_log:
@@ -572,7 +479,6 @@ class BudgetSQL:
         return bool(float(np.max(np.abs(drift))) > thr or self._cell_shift(recs) > thr)
 
     def digest_cells(self) -> list[DigestCell]:
-        """This group's cells, before the batch merges them to fit G_max."""
         cells: list[DigestCell] = []
         for cid, recs in self._open_by_cell().items():
             s = np.array([r.s_held for r in recs])
@@ -591,8 +497,6 @@ class BudgetSQL:
         return cells
 
     def digest(self) -> Digest:
-        """The digest of this group alone; a batch reads the digest of every
-        group (``BatchPlanner.digest``)."""
         if self.batch is not None:
             return self.batch.digest()
         duals = self._last_alloc.duals if self._last_alloc is not None else zeros()
@@ -626,19 +530,10 @@ class BudgetSQL:
         return sorted(out, key=lambda c: -c.p)
 
     def flagged_cells(self) -> list[str]:
-        """Which cells have drifted far enough from their prediction, in cost
-        or in observation shares, to be worth a look.  This reads the records
-        only, so it costs nothing."""
         return [cid for cid, recs in self._open_by_cell().items()
                 if self._cell_flagged(recs)]
 
-    # ------------------------------------------------------------------ #
-    # the certificate
-    # ------------------------------------------------------------------ #
     def certificate(self, need: float | None = None) -> Certificate:
-        """The certificate for this group at the duals of its last solve, with the price
-        of its share of one turn.  ``need`` stops the search once Psi exceeds
-        it, since the test only compares."""
         alloc = self._last_alloc
         duals = alloc.duals if alloc is not None else zeros()
         omega = {}
@@ -650,7 +545,6 @@ class BudgetSQL:
                        duals, omega, self.turn_charge(),
                        depth=self.cfg.certificate_depth, need=need)
 
-    # ---- used by the tools ----
     def owns(self, cell: str) -> bool:
         return any(r.cell == cell for r in self.records.values())
 
@@ -668,8 +562,6 @@ class BudgetSQL:
         return ok
 
     def probe(self, cell: str, stage, n: int) -> dict:
-        """Run a stage on a few questions of a cell, to observe a cell whose
-        predictions spread widely or rest on few training questions."""
         recs = [r for r in self.records.values() if r.cell == cell and not r.closed]
         picked = recs[: max(0, int(n))]
         before = self.meter.stats.spend.copy()

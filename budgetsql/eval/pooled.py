@@ -1,10 +1,3 @@
-"""One budget for a whole batch of several databases.
-
-A deployment may give its day's questions one budget instead of one per
-database, which lets a planner move slack between databases.  Every learned
-component must still be fitted without the database it plans, so a pooled batch
-is served by the per-database fits, routed by each question's own database.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -126,7 +119,6 @@ class PooledValues:
         return PooledValues({d: v.with_cfg(cfg) for d, v in self.by_db.items()}, cfg)
 
     def bound_forms(self, metas, states, s_held, grammar=None) -> list:
-        """Each question's certificate bound from its own database's stacks."""
         out: list = [None] * len(metas)
         index: dict[str, list[int]] = {}
         for i, m in enumerate(metas):

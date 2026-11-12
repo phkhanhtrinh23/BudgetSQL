@@ -1,28 +1,3 @@
-"""When calling the agent can still pay for itself: the certificate.
-
-After a re-solve, the dual prices say what a unit of each dimension is worth
-(lambda) and what each open question is already worth (omega).  Scoring every
-composition the grammar still admits from each open question's state gives the
-most any new candidate could add,
-
-    Psi = sum_i ( max_{w in W(G)} p-tilde_iw - lambda' c-hat_iw - omega_i )^+ .
-
-If Psi is at most what a turn would cost at those prices, lambda' rho_turn, no
-turn that only adds candidates can raise the program's value once the turn is
-charged, so the agent is not called.
-
-The values are the stacked values p-tilde the program allocates.  The stacks
-are linear in the rollout's success, so ``scale * p-hat - lambda' c-hat`` is
-maximised over every composition of the grammar exactly, by backward induction
-over the observation tree; the direct head's share, which reads a whole
-workflow, is bounded by its largest value over every workflow description the
-grammar allows from the state (``StackedValues.bound_forms``).  The search
-expands the tree level by level for many questions at once, so each level costs
-one batch of head evaluations, and it skips an action whose most optimistic
-value --- certain success at its own expected cost --- cannot beat stopping
-where it starts.  Both keep Psi an upper bound of the exact Psi, so a failed test is
-still a proof.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -33,8 +8,6 @@ from ..features import QuestionMeta
 from ..grammar import Grammar, State
 from ..worldmodel.model import StageWorldModel
 
-#: Questions searched per batch of head evaluations; the search stops between
-#: chunks once Psi exceeds what the test needs.
 CHUNK = 64
 
 
@@ -65,10 +38,6 @@ def best_priced_values(model: StageWorldModel, grammar: Grammar,
                        items: list[tuple[QuestionMeta, State, float]],
                        duals: np.ndarray, scales: list[float],
                        depth: int | None = None) -> list[float]:
-    """For each ``(meta, state, s_held)``, the maximum over every composition
-    the grammar admits from ``state``, stop included, of
-    ``scale * p-hat(w) - duals' c-hat(w)``.  ``depth`` caps the stages searched
-    (``None``: the whole grammar)."""
     duals = np.asarray(duals, dtype=float)
     roots = [_Node(i, st, float(s), 0) for i, (_, st, s) in enumerate(items)]
     levels: list[list[_Node]] = [roots]
@@ -116,11 +85,6 @@ def certify(model: StageWorldModel, values, grammar: Grammar,
             duals: np.ndarray, omega: dict[str, float],
             turn_worst_case: np.ndarray, depth: int | None = None,
             need: float | None = None) -> Certificate:
-    """Compute Psi and the test Psi > lambda' rho_turn.
-
-    ``values`` are the stacked values the program allocates (``None`` scores
-    with the raw rollout).  ``need`` lets the search stop once Psi exceeds it;
-    by default it is the turn's price."""
     price = float(np.asarray(duals, dtype=float) @ np.asarray(turn_worst_case, dtype=float))
     need = price if need is None else float(need)
     per_q: dict[str, float] = {}

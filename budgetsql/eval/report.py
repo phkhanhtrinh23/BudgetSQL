@@ -1,4 +1,3 @@
-"""Rendering results as plain text tables."""
 from __future__ import annotations
 
 import json
