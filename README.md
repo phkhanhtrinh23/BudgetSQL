@@ -64,12 +64,6 @@ budgetsql/
   eval/            runs, statistics, tables
 ```
 
-## Tests
-
-```bash
-pytest -q
-```
-
 ## License
 
 MIT. See [LICENSE](LICENSE).
