@@ -26,8 +26,6 @@ def applies(cfg: PlannerConfig) -> bool:
 
 @dataclass
 class ModelledEffects:
-    """Per named budget vector, each component's effect."""
-
     by_vector: dict[str, dict[str, Effect]] = field(default_factory=dict)
 
     def total(self, name: str) -> Effect:

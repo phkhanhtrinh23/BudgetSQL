@@ -18,11 +18,6 @@ EPS = 1e-9
 
 @dataclass
 class StagePrediction:
-    """A stage's predicted observation distribution, effect on the held answer
-    and cost.  The observation distribution is stored conditioned on the held
-    answer's correctness, so resolving it against a prior keeps the arithmetic
-    consistent."""
-
     stage_kind: str
     labels: tuple[str, ...]
     p_given_correct: np.ndarray
@@ -84,8 +79,6 @@ class ResolvedStage:
 
 @dataclass
 class Rollout:
-    """What a continuation is predicted to buy and to cost from one state."""
-
     p: float
     cost: np.ndarray
     var: np.ndarray
@@ -99,8 +92,6 @@ class Rollout:
 
 
 class StageWorldModel:
-    """Trained on a trace corpus, leaving out the databases it will plan."""
-
     def __init__(self, cfg: PlannerConfig | None = None):
         self.cfg = cfg or PlannerConfig()
         self.heads: dict[str, StageHeads] = {}
@@ -468,8 +459,6 @@ def _collect(model: "StageWorldModel", meta: QuestionMeta, state: State, wf: Wor
 
 @dataclass(frozen=True)
 class _Values:
-    """Imputed observables of a stage, read by ``Observables.after``."""
-
     n_distinct: float = 1.0
     completion_tokens: float = 0.0
     equal_to_held: float = 0.0

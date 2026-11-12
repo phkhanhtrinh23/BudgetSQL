@@ -9,8 +9,6 @@ from .planner import BudgetSQL, RunResult
 
 
 class BatchPlanner:
-    """Drives the planners of a batch's budget groups and holds the agent."""
-
     def __init__(self, planners: list[BudgetSQL], cfg: PlannerConfig | None = None,
                  agent=None):
         self.planners = list(planners)

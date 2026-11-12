@@ -15,9 +15,6 @@ from ..trace.corpus import TraceCorpus
 
 @dataclass
 class Method:
-    """Base class: fit whatever the method needs on other databases, then run a
-    budget group under one meter."""
-
     name: str = "method"
     corpus: TraceCorpus | None = None
     cfg: PlannerConfig = field(default_factory=PlannerConfig)

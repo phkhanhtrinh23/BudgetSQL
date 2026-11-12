@@ -16,9 +16,6 @@ def head_key(stage: Stage) -> str:
 
 
 class _Classifier:
-    """A multi-class head that falls back to the training frequencies when a
-    class is too rare for a tree to learn anything about it."""
-
     def __init__(self, labels: tuple[str, ...], min_support: int = 30, **kw):
         self.labels = labels
         self.min_support = min_support
@@ -84,10 +81,6 @@ class _Binary:
 
 
 class _Regressor:
-    """Costs are regressed in their original scale: a budget pays the arithmetic
-    mean of a stage's cost, which a squared-error fit of the logarithm would
-    under-state."""
-
     def __init__(self, log_scale: bool = False, min_support: int = 30, **kw):
         self.log_scale = log_scale
         self.min_support = min_support
@@ -119,8 +112,6 @@ class _Regressor:
 
 @dataclass
 class StageHeads:
-    """The heads of one stage type."""
-
     labels: tuple[str, ...]
     kind: str
     obs_given_correct: _Classifier | None = None

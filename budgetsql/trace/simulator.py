@@ -14,9 +14,6 @@ from .base import StageOutcome
 
 @dataclass(frozen=True)
 class SimulatorParams:
-    """Tier skill, own-error scale and malformed-output cut, with the per-tier
-    prices and latencies of the executors."""
-
     theta_sd: float = 3.4
     theta_from_text: float = 0.25
     skill: dict[str, float] = field(default_factory=lambda: {"S": -0.711, "M": 0.158, "L": 0.247})
@@ -51,8 +48,6 @@ class _Latent:
 
 
 class SimulatedTrace:
-    """A trace source over simulated questions."""
-
     MAX_SAMPLES = 8
 
     def __init__(self, n_questions: int = 1530, n_dbs: int = 11,

@@ -44,9 +44,6 @@ def _fmt(v) -> str:
 
 
 class ToolBox:
-    """Bound to one batch: a digest cell may stand for several planner cells,
-    possibly of different budget groups, and each tool acts on all of them."""
-
     def __init__(self, target):
         from .batch import BatchPlanner
         if isinstance(target, BatchPlanner):

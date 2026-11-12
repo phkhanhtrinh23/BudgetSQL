@@ -14,8 +14,6 @@ STAGE_KINDS = ("context", "generate", "execute", "repair", "verify", "escalate")
 
 @dataclass
 class QuestionMeta:
-    """What is known about a question before anything runs."""
-
     qid: str
     db: str
     n_question_tokens: int = 0

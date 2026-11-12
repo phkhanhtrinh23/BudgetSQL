@@ -920,16 +920,6 @@ def predicted_versus_replayed(bench: Workbench, budgets: list[str] | None = None
 
 @dataclass
 class Scenario:
-    """One deployment scenario: who plans and who answers.
-
-    ``bench`` is the workbench of the executors' trace; for open-weight
-    executors served locally its money is amortised GPU time, and
-    ``executor_prices`` are the per-token prices the meter reserves at.
-    ``time_scale`` scales the vector's service time by local-to-API latency.
-    ``effects`` are this agent's modelled effects, ``agent_price`` its price.
-    A latent digest is charged as ``latent_tokens`` prompt tokens; the replay
-    models its turns, so only what a turn costs changes."""
-
     name: str
     agent_price: object = None
     bench: object = None

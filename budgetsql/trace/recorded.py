@@ -57,8 +57,6 @@ def read_jsonl(path: str | Path) -> Iterator[dict]:
 
 
 class RecordedTrace:
-    """Replays stage outcomes recorded by a collection run."""
-
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self._meta: list[QuestionMeta] = []

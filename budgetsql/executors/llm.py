@@ -15,8 +15,6 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 @dataclass
 class ChatClient:
-    """One tier of executor, or the planning agent."""
-
     model: str
     tier: str = "M"
     base_url: str = field(default_factory=lambda: os.environ.get(

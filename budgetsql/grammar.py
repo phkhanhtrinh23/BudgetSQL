@@ -68,12 +68,6 @@ REJECTED = "~rejected"
 
 @dataclass(frozen=True)
 class Observables:
-    """The numeric part of what the executed stages revealed about the held
-    answer: how many distinct results its samples gave, how long its producing
-    call's completion was, and how many earlier answers agree with it (with
-    ``n_earlier`` the answers produced besides it).  In an imagined rollout
-    they are imputed by their training mean given the stage and observation."""
-
     n_distinct: float = 1.0
     completion_tokens: float = 0.0
     earlier_equal: float = 0.0
@@ -98,17 +92,6 @@ class Observables:
 
 @dataclass(frozen=True)
 class State:
-    """What the planner knows about one question: the stages run and what they
-    returned.  ``phi`` in :mod:`budgetsql.features` summarises it for the
-    world model's heads.
-
-    The held answer is the one Select kept: a replacing stage whose new answer
-    is rejected leaves the earlier answer, its producing stage and its
-    observation held.  Which replacing stages were rejected is part of the
-    branch, because every later stage --- a verification, a comparison of a
-    new answer with the held one --- reads the answer held.
-    """
-
     history: tuple[tuple[Stage, str], ...] = ()
     ctx: str = "full"
     answer_stage: Stage | None = None
@@ -194,10 +177,6 @@ class State:
 
 @dataclass(frozen=True)
 class Workflow:
-    """A decision tree over stages.  ``children`` maps an observation of
-    ``stage`` to the sub-workflow that follows it; a missing or ``None`` child
-    stops and keeps the answer held at that point."""
-
     stage: Stage | None = None
     children: Mapping[str, "Workflow | None"] = field(default_factory=dict)
     name: str = ""
@@ -279,8 +258,6 @@ def context(level: str) -> Stage:
 
 
 class Grammar:
-    """Which stages may follow a state, and which workflows that admits."""
-
     def __init__(self, tiers: tuple[str, ...] = TIERS,
                  max_llm_calls: int = MAX_LLM_CALLS,
                  sample_counts: tuple[int, ...] = (1, 3),

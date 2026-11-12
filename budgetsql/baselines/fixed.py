@@ -76,9 +76,6 @@ ONE_SHOT = tuple(LIBRARY_ORDER[:13]) + ("M_c+R_L",)
 
 @dataclass
 class BestFixedWorkflow(Method):
-    """The most accurate single workflow whose mean cost fits, chosen on the
-    other databases."""
-
     name: str = "best_fixed_workflow"
     profiles: dict[str, Profile] = field(default_factory=dict)
     choice: str = ""
@@ -116,8 +113,6 @@ class BestFixedWorkflow(Method):
 
 @dataclass
 class OmniRouterStyle(Method):
-    """One linear program over the batch, solved once, before anything runs."""
-
     name: str = "omnirouter_style"
 
     def prepare(self, corpus, train_dbs) -> "OmniRouterStyle":
@@ -161,11 +156,6 @@ class OmniRouterStyle(Method):
 
 @dataclass
 class Oracle(Method):
-    """The hindsight optimum of the linear relaxation: the same program with
-    the outcomes and costs the trace actually produced.  Its accuracy is the
-    relaxation's value, so a question split between workflows counts with the
-    mixture of their outcomes; nothing is rounded or executed."""
-
     name: str = "oracle"
 
     def run(self, metas, budget, meter=None) -> RunResult:

@@ -36,13 +36,6 @@ class Agent(Protocol):
 
 @dataclass
 class PlanningAgent:
-    """Composes candidates where the digest says they could pay.
-
-    The candidates it adds beyond the one-stage edits are escalations and
-    repairs by a larger tier, a verified escalation, and a compressed context
-    where tokens carry the price.
-    """
-
     probe_questions: int = 8
     max_compose: int = 4
     reserve: float = 0.0
@@ -96,8 +89,6 @@ def chat_agent_from_env(probe: bool = True) -> "ChatAgent":
 
 @dataclass
 class ChatAgent:
-    """Hands the digest and the tools to a language model."""
-
     client: object
     max_calls_per_turn: int = 8
     temperature: float = 0.0
@@ -159,10 +150,6 @@ def parse_calls(text: str) -> list[tuple[str, dict]]:
 
 @dataclass
 class BudgetTrackerAgent:
-    """Plans from the remaining budget alone: no predictions per question, so
-    it composes one escalation for the cells with the largest share of the batch
-    and otherwise keeps what the first stage returned."""
-
     log: list[str] = field(default_factory=list)
 
     def turn(self, digest: Digest, tools: ToolBox) -> None:

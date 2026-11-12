@@ -14,8 +14,6 @@ MIN_USEFUL_TIMEOUT_S = 0.5
 
 @dataclass(frozen=True)
 class CallLimits:
-    """The limits a call is launched with and the reservation they imply."""
-
     completion: int
     timeout_s: float
     sql_timeout_s: float
@@ -59,8 +57,6 @@ class MeterStats:
 
 
 class Meter:
-    """Charges every call against one budget vector."""
-
     def __init__(self, budget: np.ndarray, planning_cap: float | None = None):
         self.budget = np.asarray(budget, dtype=float).copy()
         self.planning_cap = planning_cap

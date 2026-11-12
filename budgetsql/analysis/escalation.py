@@ -7,8 +7,6 @@ import numpy as np
 
 @dataclass
 class EscalationStats:
-    """Fix and regression rates of one escalation."""
-
     fix_rate: float
     regression_rate: float
 

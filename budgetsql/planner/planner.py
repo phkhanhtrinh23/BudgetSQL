@@ -113,8 +113,6 @@ class RunResult:
 
 
 class BudgetSQL:
-    """Plans and runs one budget group."""
-
     def __init__(self, values: StackedValues, corpus: TraceCorpus,
                  grammar: Grammar | None = None, cfg: PlannerConfig | None = None,
                  agent=None, library: dict[str, Workflow] | None = None):

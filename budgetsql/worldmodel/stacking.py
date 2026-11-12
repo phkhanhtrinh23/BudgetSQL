@@ -80,9 +80,6 @@ def descriptor_box(grammar: Grammar, state: State) -> tuple[np.ndarray, np.ndarr
 
 
 class DirectHead:
-    """Predicts a whole workflow's outcome from the question's state and the
-    workflow's description, without rolling its stages out."""
-
     def __init__(self, min_rows: int = 40):
         self.min_rows = min_rows
         self.model: object | None = None
@@ -119,8 +116,6 @@ class DirectHead:
 
 @dataclass
 class ValueStack:
-    """Maps the pair of predictions onto a calibrated value and gain."""
-
     correctness: object | None = None
     gain: object | None = None
     opening: object | None = None
@@ -162,9 +157,6 @@ class ValueStack:
 
 @dataclass
 class StackedValues:
-    """The values the allocation sees: a calibrated value for stop and a
-    calibrated gain for every continuation."""
-
     model: StageWorldModel
     direct: DirectHead
     stack: ValueStack
@@ -265,14 +257,6 @@ class StackedValues:
 
 
 class CrossFitStacker:
-    """Fits the direct head and the stacks for one held-out budget group.
-
-    The rows are continuations: an opening workflow is replayed on a training
-    question, the state it leaves is the state a continuation would start from,
-    and the realised gain over keeping the held answer is what the gain stack
-    learns to predict from the two predictions.
-    """
-
     def __init__(self, cfg: PlannerConfig | None = None, inner_folds: int = 4,
                  workflows: dict[str, Workflow] | None = None,
                  grammar: Grammar | None = None,
@@ -447,8 +431,6 @@ def selector(model: StageWorldModel, meta: QuestionMeta, s_held: float):
 
 @dataclass
 class _Row:
-    """One calibration row: what was predicted, and what happened."""
-
     features: np.ndarray
     state_features: np.ndarray
     rolled: float

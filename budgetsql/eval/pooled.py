@@ -10,8 +10,6 @@ from ..grammar import State, Workflow
 
 
 class PooledModel:
-    """The per-database world models behind one interface."""
-
     def __init__(self, by_db: dict[str, object]):
         self.by_db = dict(by_db)
         first = next(iter(self.by_db.values()))
@@ -105,8 +103,6 @@ class PooledModel:
 
 @dataclass
 class PooledValues:
-    """The per-database calibrations behind one interface."""
-
     by_db: dict[str, object] = field(default_factory=dict)
     cfg: PlannerConfig = field(default_factory=PlannerConfig)
     model: PooledModel | None = None

@@ -12,14 +12,6 @@ from ..grammar import Stage, State
 
 @dataclass
 class StageOutcome:
-    """One recorded stage on one branch.
-
-    ``answer_correct`` is the correctness of the answer this stage produced
-    (``None`` for stages that only observe) and ``held_before`` the correctness
-    of the answer held before it, so a fix and a regression are labelled before
-    any selection.
-    """
-
     obs: str
     cost: np.ndarray = field(default_factory=zeros)
     worst_case: np.ndarray = field(default_factory=zeros)
@@ -71,12 +63,6 @@ class StageOutcome:
 
 
 class TraceSource(Protocol):
-    """A branch-faithful source of stage outcomes.
-
-    Every stage of the grammar is available on every question with its own
-    prompt, sample and charged cost; a branch is never spliced into another.
-    """
-
     def questions(self) -> list[QuestionMeta]:
         ...
 

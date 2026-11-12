@@ -11,8 +11,6 @@ from .base import StageOutcome, TraceSource
 
 @dataclass
 class TrainingRow:
-    """One (state, stage, outcome) triple of the corpus."""
-
     meta: QuestionMeta
     state: State
     stage: Stage
@@ -29,13 +27,6 @@ class TrainingRow:
 
 
 class TraceCorpus:
-    """A trace source with the sampling the world model trains on.
-
-    ``training_rows`` walks the branches of the grammar breadth first and keeps
-    at most ``max_states`` states per question, so the corpus covers every stage
-    type at every depth without enumerating the whole tree.
-    """
-
     def __init__(self, source: TraceSource, grammar: Grammar | None = None,
                  max_states: int = 48, seed: int = 0):
         self.source = source

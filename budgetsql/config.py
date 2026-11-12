@@ -26,8 +26,6 @@ def as_dict(v) -> dict[str, float]:
 
 @dataclass(frozen=True)
 class Price:
-    """List price in USD per million tokens."""
-
     inp: float
     out: float
 
@@ -64,9 +62,6 @@ class ExecutorLimits:
 
 @dataclass(frozen=True)
 class PlannerConfig:
-    """Planner settings.  The defaults are what :class:`budgetsql.planner.BudgetSQL`
-    uses when nothing is overridden."""
-
     min_support: int = 30
     prior_calls: float = 20.0
     n_estimators: int = 150

@@ -20,8 +20,6 @@ from .recorded import branch_key, write_jsonl
 
 @dataclass
 class Question:
-    """One benchmark item."""
-
     qid: str
     db: str
     db_path: str
@@ -62,8 +60,6 @@ class _Answer:
 
 @dataclass
 class Collector:
-    """Runs the grammar on real questions and records what every stage returned."""
-
     tiers: dict[str, ChatClient]
     grammar: Grammar = field(default_factory=Grammar)
     max_states: int = 48

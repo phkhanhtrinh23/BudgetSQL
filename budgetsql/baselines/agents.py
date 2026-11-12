@@ -60,14 +60,6 @@ class AgentNoWorldModel(Method):
 
 @dataclass
 class AgentDryRuns(Method):
-    """Pays for a sample of the batch to measure what each candidate costs.
-
-    It runs the opening stage of a few candidates on a sample of the questions,
-    charges the sample to the same budget, and corrects its cost estimates with
-    what it measured.  The sample says nothing about which questions need more,
-    only what the stages cost on this workload.
-    """
-
     name: str = "llm_agent_dry_runs"
     dry_share: float = 0.05
     probe_workflows: int = 4
@@ -109,14 +101,6 @@ class AgentDryRuns(Method):
 
 @dataclass
 class ProfiledPerRequest(VineLMStyle):
-    """The ablation arm with the world model and the allocation replaced by
-    per-request planning on profiled averages.  Each request gets its own
-    share of the budget, opens with the composition (any that begins with a
-    single call) whose profiled accuracy is highest among those that fit, and,
-    after observing its first stage, takes the continuation whose profiled
-    accuracy given that observation is highest within what is left of its
-    share."""
-
     name: str = "profiled_per_request"
 
     def _opening_library(self) -> dict:

@@ -32,8 +32,6 @@ def _hash(*parts) -> str:
 
 @dataclass
 class BudgetGroup:
-    """The questions that share one budget vector."""
-
     name: str
     dbs: list[str]
     metas: list[QuestionMeta]
@@ -45,8 +43,6 @@ class BudgetGroup:
 
 @dataclass
 class Workbench:
-    """A workload with the components the methods need."""
-
     corpus: TraceCorpus
     cfg: PlannerConfig = field(default_factory=PlannerConfig)
     workload: Workload = field(default_factory=lambda: WORKLOADS["bird"])

@@ -22,10 +22,6 @@ class ExecutionContext:
 
 @dataclass
 class StepReport:
-    """What running a workflow did: how many stages it got through, and whether
-    the meter refused a call, a call was cancelled, or the trace held no record
-    of the branch."""
-
     stages: int = 0
     cancelled: bool = False
     refused: bool = False

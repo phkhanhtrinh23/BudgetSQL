@@ -11,9 +11,6 @@ from ..config import D, DIMS
 
 @dataclass
 class Candidate:
-    """One candidate workflow of one question, with the value and cost the world
-    model predicts for it."""
-
     qid: str
     wf_id: str
     value: float

@@ -71,8 +71,6 @@ def test_prompts_carry_the_evidence():
 
 
 class _StubClient:
-    """Answers with a fixed query, priced like the tier it stands in for."""
-
     def __init__(self, sql: str, tier: str = "M"):
         self.sql = sql
         self.price = PRICES[tier]

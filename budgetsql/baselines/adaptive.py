@@ -97,9 +97,6 @@ class CascadeRouting(Method):
 
 @dataclass
 class UABStyle(Method):
-    """A cheap answer for every question, then the rest of the budget on the
-    least confident answers."""
-
     name: str = "uab_style"
     first_tier: str = "S"
     escalation: str = "esc:L"
@@ -138,9 +135,6 @@ class UABStyle(Method):
 
 @dataclass
 class VineLMStyle(Method):
-    """Per-request planning: each question gets its share of the budget and
-    spends it on the continuation the profiles rate best."""
-
     name: str = "vinelm_style"
     table: dict = field(default_factory=dict)
     profiles: dict[str, Profile] = field(default_factory=dict)
